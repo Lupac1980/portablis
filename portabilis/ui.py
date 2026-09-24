@@ -243,9 +243,11 @@ class App(tk.Tk):
         out = Card(tab3, "Formato de saida (item 9)")
         self.fmt_var = tk.StringVar(value="PASTA")
         for v, lbl in (("PASTA", "(a) Pasta com arquivos + PortabilisLauncher.exe"),
-                       ("SFX",   "(b) Arnico .exe autoextrativo (SFX)"),
-                       ("ZIP",   "(c) Pacote comprimido para extrair e executar")):
-            tk.Radiobutton(out, text=lbl.replace("Arnico", "Unico"), value=v,
+                       ("SFX",   "(b) Unico .exe autoextrativo (SFX)"),
+                       ("ZIP",   "(c) Pacote comprimido para extrair e executar"),
+                       ("EXE",   "(d) Unico .exe portable estilo build_exe.bat "
+                                 "(extrai ao lado do exe e executa; ideal p/ pendrive)")):
+            tk.Radiobutton(out, text=lbl, value=v,
                            variable=self.fmt_var, bg=BG2, fg=FG, selectcolor=BG3,
                            activebackground=BG2, activeforeground=FG,
                            font=FONT, anchor="w").pack(fill="x", padx=14, pady=3)

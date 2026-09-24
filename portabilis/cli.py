@@ -5,7 +5,7 @@ Portabilis CLI - alternativa sem interface grafica (util para automacao/testes).
 Uso:
   python cli.py scan [--no-registry] [--no-filescan] [--json]
   python cli.py analyze "Nome do Programa"
-  python cli.py clone "Nome do Programa" --out DIR [--format PASTA|SFX|ZIP]
+  python cli.py clone "Nome do Programa" --out DIR [--format PASTA|SFX|ZIP|EXE]
                     [--strategy SANDBOX|LAUNCHER] [--trial-reset]
                     [--trial-mode generico|heuristica-avancada]
 """
@@ -80,7 +80,7 @@ def main(argv=None):
     a = sub.add_parser("analyze"); a.add_argument("name")
     c = sub.add_parser("clone");   c.add_argument("name")
     c.add_argument("--out", required=True)
-    c.add_argument("--format", choices=["PASTA", "SFX", "ZIP"], default="PASTA")
+    c.add_argument("--format", choices=["PASTA", "SFX", "ZIP", "EXE"], default="PASTA")
     c.add_argument("--strategy", choices=["SANDBOX", "LAUNCHER"], default=None)
     c.add_argument("--trial-reset", action="store_true")
     c.add_argument("--trial-mode", choices=["generico", "heuristica-avancada"],

@@ -1,2 +1,6 @@
+# Python bytecode and cache
 __pycache__/
 *.pyc
+
+# Git bundles
+*.bundle
