@@ -1,0 +1,1796 @@
+From c9a7c7b50464051cf78be4b41c8f25b33d202b12 Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Thu, 24 Sep 2026 01:12:10 +0000
+Subject: [PATCH 1/2] Portabilis MVP: detector/analizador/clonador de programas
+ com GUI, CLI, launcher portable e build PyInstaller
+
+---
+ .gitignore                       |   4 +
+ portabilis/Portabilis.spec       |  39 +++
+ portabilis/README.md             | 101 ++++++
+ portabilis/assets/portabilis.ico | Bin 0 -> 9662 bytes
+ portabilis/build_exe.bat         |  26 ++
+ portabilis/cli.py                | 100 ++++++
+ portabilis/clone.py              | 565 +++++++++++++++++++++++++++++++
+ portabilis/main.py               |  21 ++
+ portabilis/scan.py               | 301 ++++++++++++++++
+ portabilis/ui.py                 | 425 +++++++++++++++++++++++
+ 10 files changed, 1582 insertions(+)
+ create mode 100644 .gitignore
+ create mode 100644 portabilis/Portabilis.spec
+ create mode 100644 portabilis/README.md
+ create mode 100644 portabilis/assets/portabilis.ico
+ create mode 100644 portabilis/build_exe.bat
+ create mode 100644 portabilis/cli.py
+ create mode 100644 portabilis/clone.py
+ create mode 100644 portabilis/main.py
+ create mode 100644 portabilis/scan.py
+ create mode 100644 portabilis/ui.py
+
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..4f0d76c
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,4 @@
++__pycache__/
++dist/
++build/
++*.pyc
+diff --git a/portabilis/Portabilis.spec b/portabilis/Portabilis.spec
+new file mode 100644
+index 0000000..a7efcf2
+--- /dev/null
++++ b/portabilis/Portabilis.spec
+@@ -0,0 +1,39 @@
++# -*- mode: python ; coding: utf-8 -*-
++# Spec do PyInstaller para gerar Portabilis.exe (portable, sem instalacao).
++# Build no Windows:  pyinstaller Portabilis.spec --noconfirm
++block_cipher = None
++
++a = Analysis(
++    ['main.py'],
++    pathex=['.'],
++    binaries=[],
++    datas=[('scan.py', '.'), ('clone.py', '.'), ('ui.py', '.'), ('cli.py', '.')],
++    hiddenimports=['winreg'],
++    hookspath=[],
++    runtime_hooks=[],
++    excludes=['matplotlib', 'numpy', 'pandas'],
++    win_no_prefer_redirects=False,
++    win_private_assemblies=False,
++    cipher=block_cipher,
++    noarchive=False,
++)
++pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
++
++exe = EXE(
++    pyz,
++    a.scripts,
++    a.binaries,
++    a.zipfiles,
++    a.datas,
++    [],
++    name='Portabilis',
++    debug=False,
++    bootloader_ignore_signals=False,
++    strip=False,
++    upx=True,               # se tiver UPX instalado, melhora a compressao
++    upx_exclude=[],
++    runtime_tmpdir=None,    # None = one-file portavel (extrai em temp controlado)
++    console=False,          # app de GUI; use True para depurar
++    disable_windowed_traceback=False,
++    icon='assets/portabilis.ico' if __import__('os').path.exists('assets/portabilis.ico') else None,
++)
+diff --git a/portabilis/README.md b/portabilis/README.md
+new file mode 100644
+index 0000000..498e41a
+--- /dev/null
++++ b/portabilis/README.md
+@@ -0,0 +1,101 @@
++# Portabilis 🧉
++
++Clone programas instalados no Windows e execute-os como **portáteis** — MVP focado
++no caso real do **Cool Edit Pro 2.1**, mas funciona para a maioria dos programas
++*standalone* (sem dependências profundas de sistema).
++
++## O que o Portabilis faz
++
++| Etapa | Descrição |
++|---|---|
++| **1 · Detectar** | Lista programas via **(a)** Registro (`HKLM/HKCU\...\CurrentVersion\Uninstall`, a mesma fonte do Painel de Controle) e **(b)** varredura de `.exe` em pastas comuns (Program Files, Desktop, Downloads, `C:\Apps`…) |
++| **2 · Analisar** | Gera um **relatório de viabilidade ANTES da execução**: estratégia recomendada (SANDBOX / LAUNCHER / MANUAL), riscos (serviços, drivers, shell extensions), tamanho, e artefatos de licença/trial encontrados |
++| **3 · Clonar** | Copia os arquivos do programa, exporta as chaves de registro relevantes (`reg export → *.reg`) e gera um **launcher** que aplica esse contexto antes de executar o programa |
++
++### Estratégias (item 6)
++- **SANDBOX (nível ThinApp, pragmática)** – arquivos em `Data\Sandbox`, registro em
++  `Data\Registry`, launcher redireciona `APPDATA/LOCALAPPDATA/TEMP` para dentro do pacote.
++- **LAUNCHER (fallback)** – cópia + registro exportado + loader de ambiente; é o plano B
++  quando a sandbox completa não é suficiente.
++- **MANUAL** – apenas relatório (serviços/drivers/kernel não são clonáveis no MVP).
++
++### Reset de contadores de uso / trial (item 7)
++- Varredura **genérica** por chaves/arquivos conhecidos (`TrialDays`, `RunCount`,
++  `LaunchCount`, `licen*`, `regist*`, `activ*` em Registre + AppData/ProgramData).
++- Modo **heurística avançada** opcional (detecta padrões de trial por nome de valor).
++- O snapshot é salvo em `Data\trial_snapshot.json`; o launcher zera/restaura na execução.
++- ⚠️ Use somente em software que você possui/licenciou. Proteções avançadas
++  (dongle, ativação por servidor, time-bomb criptografada) são reportadas como
++  impossibilidade no relatório — o MVP não as contorna.
++
++### Formatos de saída (item 9) — escolha na aba "Clonar"
++1. **(a) PASTA** – pasta com tudo + `PortabilisLauncher.exe`
++2. **(b) SFX** – único `.exe` autoextrativo (via `iexpress` nativo; fallback ZIP)
++3. **(c) ZIP** – pacote comprimido para extrair e executar
++
++## Estrutura do código
++
++```
++portabilis/
++├── main.py            # entrada da GUI (vira Portabilis.exe)
++├── ui.py              # interface tkinter dark moderna (3 abas)
++├── scan.py            # detecção: registro (a) + varredura .exe (b) + análise de riscos
++├── clone.py           # cópia, exportação de registro, trial snapshot, launcher, SFX/ZIP
++├── cli.py             # alternativa sem GUI (scan/analyze/clone) p/ automação
++├── Portabilis.spec    # spec PyInstaller
++├── build_exe.bat      # build com um clique no Windows
++└── assets/portabilis.ico
++```
++
++O **launcher embutido nos clones** (`launcher_source.py` → compilado como
++`PortabilisLauncher.exe`) executa nesta ordem: imprime o relatório de viabilidade
++(exige confirmação se houver `[BLOQUEADO]`) → importa os `.reg` na 1ª execução →
++redireciona AppData/Temp para o pacote → semeia a config existente → reseta contadores
++de trial (se habilitado) → adiciona a pasta do pacote ao `PATH` (**ponte para DLLs**)
++e executa o programa alvo.
++
++## Como gerar o Portabilis.exe (portable)
++
++No Windows, com Python 3.10+ instalado:
++
++```bat
++cd portabilis
++build_exe.bat
++```
++
++ou manualmente:
++
++```bat
++pip install pyinstaller
++pyinstaller Portabilis.spec --noconfirm
++```
++
++Resultado: **`dist\Portabilis.exe`** — um único arquivo executável, sem instalação,
++copiável para pen-drive.
++
++## Uso
++
++1. Execute `Portabilis.exe` → aba **1 · Detectar** → *Escanear programas*.
++2. Selecione **Cool Edit Pro 2.1** (duplo clique vai para a aba 2).
++3. Leia o diagnóstico; escolha SANDBOX ou LAUNCHER; habilite o reset de trial se desejar.
++4. Aba **3 · Clonar** → formato de saída → **CLONAR PROGRAMA**.
++5. Abra o pacote gerado e execute `PortabilisLauncher.exe`
++   (como administrador na 1ª vez, se houver chaves HKLM).
++
++### CLI equivalente
++
++```bat
++python cli.py scan
++python cli.py analyze "Cool Edit Pro"
++python cli.py clone "Cool Edit Pro" --out D:\portatil --format PASTA ^
++       --strategy LAUNCHER --trial-reset --trial-mode generico
++```
++
++## Limitações conhecidas (MVP)
++
++- Não virtualiza serviços NT, drivers nem integrações de shell (reporta MANUAL).
++- Chaves HKLM protegidas exigem elevação na primeira execução.
++- DLLs compartilhadas: resolvidas pela ponte de `PATH`; DLL de sistema específica
++  deve ser copiada manualmente para `Data\Sandbox`.
++- Clone 100% fiel nível ThinApp/Cameyo exige monitoramento em tempo real de
++  filesystem/registro (minifilter + API hooking) — fora do escopo deste MVP.
+diff --git a/portabilis/assets/portabilis.ico b/portabilis/assets/portabilis.ico
+new file mode 100644
+index 0000000000000000000000000000000000000000..41d4573340396182c313607e2229e51ea2e006cf
+GIT binary patch
+literal 9662
+zcmeH~S#H8G6h+-l^t(Tm`pIhO2&Dt_44p?hET+4>%}r#fa)1UC$9^qF7lbpN<EM~^
+zQd`lhR8rCVj{4eFYFjC_7bTifwJ4nDm_^$*<L|9NuMhNkK%eO*8FT<<*iJHP0nE6W
+zWYPe9uS916bQ$tnI{5HtkAU_N=rB1sOzZCJ(HsLUhWw5kTzNDmK$8*ZP@e(~MxaCe
+z3Wy`n;qn?_BsyH&0E|S3^IL$C>Tq_K@Q3D*<#}DZ2gongf&3vmEUUrk1Hedis6HnA
+zp*zg0LG=kBzf^|``2{(cHK;rTk{nF_6Y>jkNb$b_k{nF_WAY1fNb$b{k{nF_Bk~J!
+zNb%1A8wW(gN55q9AClj~f&4!Dr4;`gVB?_qi*_*i56ExfKz<+nQi}f_uyG*2If}R+
+zO#XfHTR4#2?D;t7+QH=KcN+)I|I>kUF7JnV>@oibu&P7MZ}hF2-<886{&gJ4tcT10
+zam(1bt;`x&)S;-}`#1iO9kQ^;{GULGb;!yeqQffedf##&b<jLEpS~Szn9XB+IhY*l
+zd@tHz9o9w17Ui($`gzT}`fbgNFY9^odQNA(o~!*<?fG=C;fiN--pva9mlgO1oOqM>
+
+literal 0
+HcmV?d00001
+
+diff --git a/portabilis/build_exe.bat b/portabilis/build_exe.bat
+new file mode 100644
+index 0000000..a81a677
+--- /dev/null
++++ b/portabilis/build_exe.bat
+@@ -0,0 +1,26 @@
++@echo off
++REM ============================================================
++REM  Portabilis - gera o Portabilis.exe portable
++REM  Requisitos no Windows: Python 3.10+ no PATH
++REM ============================================================
++cd /d "%~dp0"
++echo [1/3] Verificando Python...
++python --version || (echo Python nao encontrado no PATH & exit /b 1)
++
++echo [2/3] Instalando dependencias (pyinstaller)...
++python -m pip install --upgrade pip >nul
++python -m pip install pyinstaller || (echo Falha ao instalar pyinstaller & exit /b 1)
++
++echo [3/3] Construindo Portabilis.exe ...
++python -m PyInstaller Portabilis.spec --noconfirm
++if errorlevel 1 (
++  echo Falha no build. Tente: python -m PyInstaller --onefile --windowed main.py
++  exit /b 1
++)
++
++echo.
++echo ============================================================
++echo  OK! Executavel portable gerado em: dist\Portabilis.exe
++echo  Basta copiar esse unico .exe para qualquer pasta/pen-drive.
++echo ============================================================
++pause
+diff --git a/portabilis/cli.py b/portabilis/cli.py
+new file mode 100644
+index 0000000..1375dd9
+--- /dev/null
++++ b/portabilis/cli.py
+@@ -0,0 +1,100 @@
++# -*- coding: utf-8 -*-
++"""
++Portabilis CLI - alternativa sem interface grafica (util para automacao/testes).
++
++Uso:
++  python cli.py scan [--no-registry] [--no-filescan] [--json]
++  python cli.py analyze "Nome do Programa"
++  python cli.py clone "Nome do Programa" --out DIR [--format PASTA|SFX|ZIP]
++                    [--strategy SANDBOX|LAUNCHER] [--trial-reset]
++                    [--trial-mode generico|heuristica-avancada]
++"""
++import os
++import sys
++import json
++import argparse
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import scan
++import clone
++
++
++def _find(apps, needle):
++    needle = needle.lower()
++    exact = [a for a in apps if a.name.lower() == needle]
++    if exact:
++        return exact[0]
++    part = [a for a in apps if needle in a.name.lower()]
++    return part[0] if len(part) == 1 else None
++
++
++def cmd_scan(args):
++    apps = scan.full_scan(not args.no_registry, not args.no_filescan)
++    if args.json:
++        print(json.dumps([a.to_dict() for a in apps], indent=2, ensure_ascii=False))
++        return 0
++    print("%-45s %-10s %-9s %s" % ("PROGRAMA", "ORIGEM", "ESTRATEGIA", "TAMANHO"))
++    print("-" * 80)
++    for a in apps:
++        src = "registro" if a.source == "registry" else "varredura"
++        print("%-45s %-10s %-9s %.1f MB" % (a.name[:44], src, a.strategy,
++                                            a.size_bytes / 1e6))
++    print("\n%d programa(s)." % len(apps))
++    return 0
++
++
++def cmd_analyze(args):
++    apps = scan.full_scan(True, True)
++    app = _find(apps, args.name)
++    if not app:
++        print("Programa nao encontrado ou ambiguo: %s" % args.name)
++        return 2
++    print(json.dumps(app.to_dict(), indent=2, ensure_ascii=False))
++    return 0
++
++
++def cmd_clone(args):
++    apps = scan.full_scan(True, True)
++    app = _find(apps, args.name)
++    if not app:
++        print("Programa nao encontrado ou ambiguo: %s" % args.name)
++        return 2
++    try:
++        art = clone.clone_program(
++            app, args.out, args.format, args.strategy,
++            args.trial_reset, args.trial_mode,
++            progress=lambda n, m: print("[%6d] %s" % (n, m)))
++        print("\nARTEFATO: %s" % art)
++        return 0
++    except clone.CloneError as e:
++        print("BLOQUEADO: %s" % e)
++        return 3
++
++
++def main(argv=None):
++    p = argparse.ArgumentParser(prog="portabilis", description=__doc__,
++                                formatter_class=argparse.RawDescriptionHelpFormatter)
++    sub = p.add_subparsers(dest="cmd")
++    s = sub.add_parser("scan");  s.add_argument("--no-registry", action="store_true")
++    s.add_argument("--no-filescan", action="store_true"); s.add_argument("--json", action="store_true")
++    a = sub.add_parser("analyze"); a.add_argument("name")
++    c = sub.add_parser("clone");   c.add_argument("name")
++    c.add_argument("--out", required=True)
++    c.add_argument("--format", choices=["PASTA", "SFX", "ZIP"], default="PASTA")
++    c.add_argument("--strategy", choices=["SANDBOX", "LAUNCHER"], default=None)
++    c.add_argument("--trial-reset", action="store_true")
++    c.add_argument("--trial-mode", choices=["generico", "heuristica-avancada"],
++                   default="generico")
++    args = p.parse_args(argv)
++    if args.cmd == "scan":
++        return cmd_scan(args)
++    if args.cmd == "analyze":
++        return cmd_analyze(args)
++    if args.cmd == "clone":
++        return cmd_clone(args)
++    p.print_help()
++    return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/portabilis/clone.py b/portabilis/clone.py
+new file mode 100644
+index 0000000..84e2742
+--- /dev/null
++++ b/portabilis/clone.py
+@@ -0,0 +1,565 @@
++# -*- coding: utf-8 -*-
++"""
++Portabilis - nucleo de clonagem (MVP).
++
++Estrategias:
++  SANDBOX  - copia arquivos para Data\\Sandbox, exporta chaves de registro para
++             Data\\Registry (*.reg) e gera launcher que aplica o contexto antes de executar.
++  LAUNCHER - mesma base pragmatica: copia + registro exportado + loader de ambiente
++             (redirects de APPDATA/LOCALAPPDATA/TEMP para dentro do pacote).
++  MANUAL   - apenas relatorio; usuario decide os passos.
++
++Formatos de saida (item 9):
++  (a) PASTA : pasta com todos os arquivos + PortabilisLauncher.exe
++  (b) SFX   : unico .exe autoextrativo (gerado com iexpress, se disponivel)
++  (c) ZIP   : pacote comprimido pronto para extrair e executar
++"""
++import os
++import sys
++import json
++import shutil
++import zipfile
++import subprocess
++import datetime
++from pathlib import Path
++from typing import List, Optional
++
++IS_WIN = sys.platform == "win32"
++if IS_WIN:
++    import winreg
++
++LAUNCHER_SRC = r'''# -*- coding: utf-8 -*-
++"""Portabilis Launcher - prepara o ambiente virtual e executa o programa clonado."""
++import os, sys, subprocess, json, shutil
++
++def here():
++    return os.path.dirname(os.path.abspath(sys.argv[0]))
++
++BASE = here()
++DATA = os.path.join(BASE, "Data")
++SANDBOX = os.path.join(DATA, "Sandbox")
++REGDIR = os.path.join(DATA, "Registry")
++MANIFEST = os.path.join(DATA, "manifest.json")
++
++def load_manifest():
++    try:
++        with open(MANIFEST, "r", encoding="utf-8") as f:
++            return json.load(f)
++    except Exception:
++        return {}
++
++def apply_registry_once(m):
++    """Importa os .reg exportados na primeira execucao (contexto inicial)."""
++    stamp = os.path.join(DATA, ".registry_applied")
++    if os.path.exists(stamp) or not m.get("apply_registry_on_first_run", True):
++        return
++    ok = 0
++    for root, _, files in os.walk(REGDIR):
++        for f in files:
++            if f.lower().endswith(".reg"):
++                p = os.path.join(root, f)
++                try:
++                    subprocess.run(["regedit", "/s", p], check=False,
++                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++                    ok += 1
++                except FileNotFoundError:
++                    pass
++    try:
++        open(stamp, "w").close()
++    except OSError:
++        pass
++    print("[Portabilis] %d arquivo(s) de registro aplicados." % ok)
++
++def redirect_env(m):
++    """Redireciona AppData/Temp para dentro do pacote (isolamento basico)."""
++    links = os.path.join(SANDBOX, "_portabilis")
++    for var in ("APPDATA", "LOCALAPPDATA", "TEMP", "TMP"):
++        target = os.path.join(links, var.lower())
++        os.makedirs(target, exist_ok=True)
++        os.environ[var] = target
++    # semeia com a config existente na 1a execucao (preserva licencas/settings)
++    seed = m.get("seed_from_real_appdata", True)
++    marker = os.path.join(links, ".seeded")
++    if seed and not os.path.exists(marker):
++        real = {"APPDATA": os.path.expandvars(r"%APPDATA%"),
++                "LOCALAPPDATA": os.path.expandvars(r"%LOCALAPPDATA%")}
++        appname = m.get("app_name", "")
++        for var, base in real.items():
++            src = os.path.join(base, appname) if appname else ""
++            if src and os.path.isdir(src):
++                dst = os.path.join(links, var.lower(), appname)
++                try:
++                    shutil.copytree(src, dst, dirs_exist_ok=True)
++                except Exception:
++                    pass
++        try:
++            open(marker, "w").close()
++        except OSError:
++            pass
++
++def reset_trial_counters(m):
++    """(Item 7) Reset dos contadores/trial capturados no snapshot do clone."""
++    snap_path = os.path.join(DATA, "trial_snapshot.json")
++    if not os.path.exists(snap_path):
++        return
++    try:
++        with open(snap_path, "r", encoding="utf-8") as f:
++            snap = json.load(f)
++    except Exception:
++        return
++    mode = m.get("trial_reset_mode", "generico")
++    try:
++        import winreg
++    except ImportError:
++        print("[Portabilis] winreg indisponivel; pulando reset.")
++        return
++    n = 0
++    for item in snap.get("registry_values", []):
++        try:
++            hive = getattr(winreg, item["hive"])
++            if mode == "generico":
++                with winreg.OpenKey(hive, item["path"], 0, winreg.KEY_SET_VALUE) as k:
++                    v, t = winreg.QueryValueEx(k, item["name"])
++                    if t == winreg.REG_DWORD and isinstance(v, int) and v != 0:
++                        winreg.SetValueEx(k, item["name"], 0, t, 0); n += 1
++                    elif t == winreg.REG_SZ and str(v).strip().isdigit():
++                        winreg.SetValueEx(k, item["name"], 0, t, "0"); n += 1
++            else:  # 'snapshot': restaura valores limpos tirados durante a clonagem
++                with winreg.OpenKey(hive, item["path"], 0, winreg.KEY_SET_VALUE) as k:
++                    winreg.SetValueEx(k, item["name"], 0, item["type"],
++                                      item["clean_value"]); n += 1
++        except OSError:
++            continue
++    print("[Portabilis] %d contador(es)/artefato(s) de trial tratados (modo=%s)." % (n, mode))
++
++def main():
++    m = load_manifest()
++    print("=" * 60)
++    print("Portabilis Launcher - %s %s" % (m.get("app_name", "?"), m.get("app_version", "")))
++    print("Estrategia: %s | Clonado em: %s" % (m.get("strategy", "?"), m.get("cloned_at", "")))
++    print("=" * 60)
++    rpt = os.path.join(BASE, m.get("report", "RELATORIO.txt"))
++    if os.path.exists(rpt):
++        with open(rpt, "r", encoding="utf-8", errors="replace") as f:
++            txt = f.read()
++        print("\n--- RELATORIO DE VIABILIDADE (leia antes de executar) ---")
++        print(txt[:4000])
++        print("--- resumo acima; relatorio completo em RELATORIO.txt ---\n")
++        if "[BLOQUEADO]" in txt:
++            ans = input("O relatorio aponta bloqueios. Continuar mesmo assim? [s/N] ").strip().lower()
++            if ans != "s":
++                sys.exit(1)
++    apply_registry_once(m)
++    redirect_env(m)
++    if m.get("trial_bypass_enabled", False):
++        try:
++            reset_trial_counters(m)
++        except Exception as e:
++            print("[Portabilis] Aviso: falha no reset de trial (%s)." % e)
++    exe = m.get("main_exe", "")
++    target = os.path.join(SANDBOX, exe) if exe else ""
++    if not target or not os.path.exists(target):
++        cands = []
++        for root, _, files in os.walk(SANDBOX):
++            cands += [os.path.join(root, f) for f in files
++                      if f.lower().endswith(".exe") and "portabilislauncher" not in f.lower()]
++        target = max(cands, key=os.path.getsize) if cands else ""
++    if not target:
++        print("[Portabilis] ERRO: executavel alvo nao encontrado em Data\\Sandbox.")
++        sys.exit(2)
++    print("[Portabilis] Executando: %s" % target)
++    env = dict(os.environ)
++    env["PATH"] = os.path.dirname(target) + os.pathsep + env.get("PATH", "")  # ponte p/ DLLs
++    proc = subprocess.Popen([target], cwd=os.path.dirname(target), env=env)
++    sys.exit(proc.wait())
++
++if __name__ == "__main__":
++    main()
++'''
++
++
++class CloneError(Exception):
++    pass
++
++
++def _now() -> str:
++    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
++
++
++def run(cmd, **kw):
++    return subprocess.run(cmd, **kw)
++
++
++# ---------------------------------------------------------------- registro
++def export_registry_keys(keys: List[str], out_dir: Path, log: List[str]) -> int:
++    """Exporta chaves ('HKLM\\SOFTWARE\\...' ou prefixo 'REG:') via reg.exe."""
++    out_dir.mkdir(parents=True, exist_ok=True)
++    count = 0
++    for key in keys:
++        k = key[4:] if key.startswith("REG:") else key
++        if not k.upper().startswith(("HKLM\\", "HKCU\\", "HKCR\\", "HKU\\", "HKCC\\")):
++            continue
++        safe = "".join(c if c.isalnum() else "_" for c in k)[:120]
++        dest = out_dir / (safe + ".reg")
++        try:
++            r = run(["reg", "export", k, str(dest), "/y"],
++                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++            if r.returncode == 0 and dest.exists():
++                count += 1
++                log.append("OK  exportado: %s" % k)
++            else:
++                log.append("FALHA ao exportar: %s (sem acesso?)" % k)
++        except FileNotFoundError:
++            log.append("reg.exe indisponivel")
++            break
++    return count
++
++
++def collect_app_reg_keys(app_name: str) -> List[str]:
++    """Heuristica: chaves sob HKLM/HKCU Software cujo nome casa o aplicativo."""
++    found: List[str] = []
++    if not IS_WIN:
++        return found
++    needle = app_name.lower()
++    words = [w for w in needle.split() if len(w) > 3]
++    pairs = [(winreg.HKEY_LOCAL_MACHINE, "HKLM"), (winreg.HKEY_CURRENT_USER, "HKCU")]
++    for hive_id, hive in pairs:
++        for base in (r"SOFTWARE", r"SOFTWARE\WOW6432Node"):
++            try:
++                root = winreg.OpenKey(hive_id, base)
++            except OSError:
++                continue
++            i = 0
++            while True:
++                try:
++                    sub = winreg.EnumKey(root, i)
++                except OSError:
++                    break
++                i += 1
++                s = sub.lower()
++                if needle in s or any(w in s for w in words):
++                    found.append("%s\\%s\\%s" % (hive, base, sub))
++            winreg.CloseKey(root)
++    return found
++
++
++TRIAL_VALUE_NAMES = ["trial", "licen", "regist", "activ", "count", "usage",
++                     "expire", "serial", "evaluation", "days", "runs", "oobe"]
++
++
++def capture_trial_snapshot(app_name: str, reg_keys: List[str], out_file: Path,
++                           log: List[str]) -> dict:
++    """Snapshot de valores suspeitos de controle de trial/uso (item 7)."""
++    snapshot = {"registry_values": [], "files": []}
++    if not IS_WIN:
++        return snapshot
++    for key in reg_keys:
++        k = key[4:] if key.startswith("REG:") else key
++        for hive_id, hive in ((winreg.HKEY_LOCAL_MACHINE, "HKLM"),
++                              (winreg.HKEY_CURRENT_USER, "HKCU")):
++            if not k.upper().startswith(hive + "\\"):
++                continue
++            kk = k[len(hive) + 1:]
++            try:
++                h = winreg.OpenKey(hive_id, kk, 0, winreg.KEY_READ)
++            except OSError:
++                continue
++            j = 0
++            while True:
++                try:
++                    name, value, typ = winreg.EnumValue(h, j)
++                except OSError:
++                    break
++                j += 1
++                low = name.lower()
++                if any(t in low for t in TRIAL_VALUE_NAMES):
++                    entry = {"hive": hive, "path": kk, "name": name, "type": int(typ)}
++                    if isinstance(value, int):
++                        entry["current"] = value
++                        entry["clean_value"] = 0
++                    elif isinstance(value, str):
++                        entry["current"] = value[:200]
++                        entry["clean_value"] = "0" if value.strip().isdigit() else value
++                    else:
++                        continue
++                    snapshot["registry_values"].append(entry)
++                    log.append("TRIAL: %s -> %s = %s" % (k, name, value))
++            winreg.CloseKey(h)
++    # arquivos suspeitos de licenca em AppData/ProgramData
++    import re as _re
++    first_word = _re.escape(app_name.split()[0]) if app_name.split() else ""
++    pat = _re.compile(first_word, _re.I)
++    for env in ("%APPDATA%", "%LOCALAPPDATA%", "%PROGRAMDATA%"):
++        base = os.path.expandvars(env)
++        if not os.path.isdir(base):
++            continue
++        for dp, dn, fn in os.walk(base):
++            if dp[len(base):].count(os.sep) > 3:
++                dn[:] = []
++                continue
++            for f in fn:
++                low = f.lower()
++                if (pat.search(dp) or pat.search(f)) and any(
++                        x in low for x in ("lic", "trial", "regist", "activ",
++                                           ".dat", ".ini", ".xml", ".json")):
++                    p = os.path.join(dp, f)
++                    try:
++                        if os.path.getsize(p) <= 64 * 1024:
++                            snapshot["files"].append({
++                                "path": p,
++                                "note": "arquivo suspeito de licenca/contadores"})
++                            log.append("TRIAL(file): %s" % p)
++                    except OSError:
++                        pass
++    out_file.parent.mkdir(parents=True, exist_ok=True)
++    out_file.write_text(json.dumps(snapshot, indent=2, ensure_ascii=False),
++                        encoding="utf-8")
++    return snapshot
++
++
++# ---------------------------------------------------------------- build
++def copy_tree(src: Path, dst: Path, progress=None) -> int:
++    n = 0
++    for item in sorted(src.rglob("*")):
++        if item.is_file():
++            rel = item.relative_to(src)
++            target = dst / rel
++            target.parent.mkdir(parents=True, exist_ok=True)
++            try:
++                shutil.copy2(item, target)
++                n += 1
++            except OSError as e:
++                if progress:
++                    progress(n, "AVISO: nao copiei %s (%s)" % (rel, e))
++            if progress and n % 50 == 0:
++                progress(n, str(rel))
++    return n
++
++
++def build_report(app, strategy, output_format, trial_info, warnings, blocked) -> str:
++    lines = []
++    lines.append("PORTABILIS - RELATORIO DE CLONAGEM")
++    lines.append("Gerado em: %s" % _now())
++    lines.append("=" * 60)
++    lines.append("Programa.....: %s %s" % (app.name, app.version))
++    lines.append("Publicador...: %s" % (app.publisher or "-"))
++    lines.append("Origem.......: %s" % ("Registro (Uninstall)"
++                                        if app.source == "registry" else "Varredura de .exe"))
++    lines.append("Local........: %s" % (app.install_location or app.main_exe))
++    lines.append("Tamanho......: %.1f MB em %d arquivos"
++                 % (app.size_bytes / 1e6, app.files_found))
++    lines.append("Estrategia...: %s" % strategy)
++    lines.append("Saida........: %s" % output_format)
++    lines.append("-" * 60)
++    lines.append("DIAGNOSTICO DE VIABILIDADE")
++    if not app.risks:
++        lines.append("[OK] Nenhuma dependencia profunda detectada "
++                     "(servicos/drivers/shell extensions).")
++    for r in app.notes:
++        lines.append("[INFO] " + r)
++    for w in warnings:
++        lines.append("[AVISO] " + w)
++    for b in blocked:
++        lines.append("[BLOQUEADO] " + b)
++    lines.append("-" * 60)
++    lines.append("ARTEFATOS DE LICENCA/TRIAL DETECTADOS (varredura generica)")
++    if trial_info.get("registry_values"):
++        for e in trial_info["registry_values"]:
++            lines.append("  REG %s\\%s -> %s (valor atual: %s)"
++                         % (e["hive"], e["path"], e["name"], e["current"]))
++    if trial_info.get("files"):
++        for e in trial_info["files"]:
++            lines.append("  ARQ %s (%s)" % (e["path"], e.get("note", "")))
++    if not trial_info.get("registry_values") and not trial_info.get("files"):
++        lines.append("  Nenhum padrao conhecido de trial/contador foi identificado.")
++    lines.append("")
++    lines.append("LIMITACOES CONHECIDAS DO MVP")
++    lines.append("- DLLs compartilhadas sao resolvidas por 'ponte': o launcher adiciona a")
++    lines.append("  pasta do pacote ao PATH; se o programa exigir uma DLL de sistema")
++    lines.append("  especifica, copie-a manualmente para Data\\Sandbox.")
++    lines.append("- Chaves HKLM protegidas exigem executar o launcher como administrador")
++    lines.append("  na primeira execucao.")
++    lines.append("- Servicos, drivers e integracoes de shell nao podem ser clonados (MANUAL).")
++    lines.append("- O reset de contadores de uso atua apenas sobre os artefatos listados")
++    lines.append("  acima; protecoes avancadas (dongle, licenca por servidor, time-bomb")
++    lines.append("  criptografada) vao alem do escopo deste MVP.")
++    lines.append("=" * 60)
++    return "\n".join(lines)
++
++
++def clone_program(app, output_dir: str, output_format: str = "PASTA",
++                  force_strategy: Optional[str] = None,
++                  trial_bypass: bool = False, trial_mode: str = "generico",
++                  progress=None) -> Path:
++    """Executa a clonagem completa. Retorna o caminho do artefato final."""
++    strategy = force_strategy or app.strategy
++    warnings: List[str] = []
++    blocked: List[str] = []
++    src = Path(app.install_location or os.path.dirname(app.main_exe or ""))
++    if not src.is_dir():
++        raise CloneError("Pasta de origem invalida: %s" % src)
++    if "service" in app.risks or "driver" in app.risks:
++        blocked.append("Dependencia de servico/driver detectada - o programa pode nao "
++                       "funcionar fora da instalacao original.")
++    if strategy == "MANUAL":
++        raise CloneError("Estrategia MANUAL exige intervencao humana; escolha "
++                         "SANDBOX ou LAUNCHER para prosseguir.")
++
++    safe_name = "".join(c if c.isalnum() or c in " ._-_" else "_" for c in app.name).strip()
++    pkg = Path(output_dir) / ("%s.Portable" % safe_name)
++    if pkg.exists():
++        shutil.rmtree(pkg, ignore_errors=True)
++    data = pkg / "Data"
++    sandbox = data / "Sandbox"
++    regdir = data / "Registry"
++    sandbox.mkdir(parents=True)
++
++    # 1) copia de arquivos
++    if progress:
++        progress(0, "Copiando arquivos de %s ..." % src)
++    nfiles = copy_tree(src, sandbox, progress)
++    if nfiles == 0:
++        raise CloneError("Nenhum arquivo copiado - nada para clonar.")
++
++    # 2) registro
++    reglog: List[str] = []
++    keys = list(app.reg_keys) + collect_app_reg_keys(app.name)
++    seen = set()
++    keys = [k for k in keys if not (k in seen or seen.add(k))]
++    nreg = export_registry_keys(keys, regdir, reglog) if IS_WIN else 0
++    if not keys:
++        warnings.append("Nenhuma chave de registro correspondente foi localizada.")
++
++    # 3) snapshot de trial (item 7)
++    trial_info = {"registry_values": [], "files": []}
++    if trial_bypass:
++        trial_info = capture_trial_snapshot(app.name, keys,
++                                            data / "trial_snapshot.json", reglog)
++
++    # 4) manifest + launcher
++    rel_exe = ""
++    if app.main_exe and Path(app.main_exe).exists():
++        try:
++            rel_exe = str(Path(app.main_exe).resolve().relative_to(src.resolve()))
++        except ValueError:
++            rel_exe = Path(app.main_exe).name
++    manifest = {
++        "app_name": app.name,
++        "app_version": app.version,
++        "publisher": app.publisher,
++        "main_exe": rel_exe,
++        "strategy": strategy,
++        "output_format": output_format,
++        "cloned_at": _now(),
++        "portabilis_version": "1.0.0-MVP",
++        "files_copied": nfiles,
++        "reg_files": nreg,
++        "trial_bypass_enabled": trial_bypass,
++        "trial_reset_mode": trial_mode if trial_bypass else None,
++        "apply_registry_on_first_run": True,
++        "seed_from_real_appdata": True,
++        "report": "RELATORIO.txt",
++    }
++    (data / "manifest.json").write_text(
++        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
++    launcher_src = pkg / "launcher_source.py"
++    launcher_src.write_text(LAUNCHER_SRC, encoding="utf-8")
++    _build_launcher_exe(launcher_src, pkg / "PortabilisLauncher.exe", warnings)
++
++    # 5) relatorios
++    report = build_report(app, strategy, output_format, trial_info, warnings, blocked)
++    (pkg / "RELATORIO.txt").write_text(report, encoding="utf-8")
++    (data / "clone_log.txt").write_text("\n".join(reglog), encoding="utf-8")
++    (pkg / "LEIA-ME.txt").write_text(
++        "Para executar o programa clonado:\r\n"
++        "  1. Abra esta pasta.\r\n"
++        "  2. Execute PortabilisLauncher.exe (como administrador na 1a vez,\r\n"
++        "     se houver chaves HKLM).\r\n\r\n"
++        "Leia RELATORIO.txt antes: ele lista dificuldades/impossibilidades\r\n"
++        "da clonagem ANTES da execucao.\r\n", encoding="utf-8")
++
++    # 6) formato de saida (item 9)
++    if output_format == "SFX":
++        artifact = _make_sfx(pkg, Path(output_dir), safe_name, warnings)
++    elif output_format == "ZIP":
++        artifact = _make_zip(pkg, Path(output_dir), safe_name)
++        shutil.rmtree(pkg, ignore_errors=True)
++    else:
++        artifact = pkg
++    if progress:
++        progress(nfiles, "Concluido: %s" % artifact)
++    return artifact
++
++
++def _build_launcher_exe(py_src: Path, exe_out: Path, warnings: List[str]):
++    """Compila o launcher para .exe com PyInstaller (usa o proprio interpretador)."""
++    py = sys.executable
++    try:
++        r = run([py, "-m", "PyInstaller", "--onefile", "--console", "--name",
++                 "PortabilisLauncher", "--distpath", str(exe_out.parent),
++                 "--workpath", str(exe_out.parent / "_build"),
++                 "--specpath", str(exe_out.parent / "_build"),
++                 "--noconfirm", str(py_src)],
++                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
++        produced = exe_out.parent / "PortabilisLauncher.exe"
++        if r.returncode == 0 and produced.exists():
++            if produced != exe_out and exe_out.exists():
++                exe_out.unlink()
++            produced.rename(exe_out)
++            shutil.rmtree(exe_out.parent / "_build", ignore_errors=True)
++            py_src.unlink(missing_ok=True)
++            return
++    except Exception:
++        pass
++    warnings.append("PyInstaller indisponivel: launcher distribuindo como "
++                    "launcher_source.py + PortabilisLauncher.bat (requer Python). "
++                    "Instale 'pip install pyinstaller' para gerar .exe nativo.")
++    bat = exe_out.with_suffix(".bat")
++    bat.write_text('@echo off\r\npython "%~dp0launcher_source.py" %*\r\n',
++                   encoding="ascii")
++
++
++def _make_sfx(pkg: Path, out_dir: Path, name: str, warnings: List[str]) -> Path:
++    """SFX unico via iexpress (nativo do Windows). Fallback: ZIP + aviso."""
++    sfx = out_dir / ("%s.Portable.exe" % name)
++    sed = out_dir / (name + ".sed")
++    sed.write_text(
++        "[Version]\r\n"
++        "Class=IEXPRESS\r\n"
++        "TargetName=%s\r\n"
++        "FriendlyName=%s Portable\r\n"
++        "SetupType=0\r\n"
++        "Package=1\r\n"
++        "[Options]\r\n"
++        "WindowTitle=%s\r\n"
++        "ButtonText=Instalar\r\n"
++        "RunProgram=Internal\\%%PACKAGEDIR%%\\PortabilisLauncher.exe\r\n"
++        "RebootNo\r\n"
++        "[SourceFiles]\r\n"
++        "SourceFiles0=%%PACKAGEDIR%%\r\n"
++        "SourceFiles00=\r\n" % (name, name, name), encoding="ascii")
++    try:
++        r = run(["iexpress", "/N", str(sed), "/Q"], timeout=900)
++        if sfx.exists() and r.returncode == 0:
++            sed.unlink(missing_ok=True)
++            shutil.rmtree(pkg, ignore_errors=True)
++            return sfx
++    except Exception:
++        pass
++    warnings.append("iexpress nao produziu o SFX nesta maquina; fallback para ZIP.")
++    try:
++        sed.unlink(missing_ok=True)
++    except OSError:
++        pass
++    z = _make_zip(pkg, out_dir, name)
++    shutil.rmtree(pkg, ignore_errors=True)
++    return z
++
++
++def _make_zip(pkg: Path, out_dir: Path, name: str) -> Path:
++    zp = out_dir / ("%s.Portable.zip" % name)
++    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
++        for p in sorted(pkg.rglob("*")):
++            if p.is_file():
++                z.write(p, p.relative_to(pkg.parent))
++    return zp
+diff --git a/portabilis/main.py b/portabilis/main.py
+new file mode 100644
+index 0000000..83bdd2c
+--- /dev/null
++++ b/portabilis/main.py
+@@ -0,0 +1,21 @@
++# -*- coding: utf-8 -*-
++"""Portabilis - ponto de entrada (empacotado como Portabilis.exe pelo PyInstaller)."""
++import os
++import sys
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++
++
++def main():
++    try:
++        from ui import App
++        app = App()
++        app.mainloop()
++    except Exception as e:  # fallback CLI se nao houver display/tkinter
++        print("Interface grafica indisponivel (%s). Modo linha de comando:" % e)
++        import cli
++        sys.exit(cli.main(["--help"]))
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/portabilis/scan.py b/portabilis/scan.py
+new file mode 100644
+index 0000000..f09a479
+--- /dev/null
++++ b/portabilis/scan.py
+@@ -0,0 +1,301 @@
++# -*- coding: utf-8 -*-
++"""
++Portabilis - modulo de deteccao/analise de programas instalados.
++
++Fontes de deteccao (configuraveis na UI):
++  (a) Registro Windows: HKLM/HKCU ...\\Microsoft\\Windows\\CurrentVersion\\Uninstall
++      (mesma fonte usada pelo Painel de Controle / "Adicionar ou Remover Programas")
++  (b) Varredura de .exe em pastas comuns (programas ja portaveis / nao registrados):
++      Program Files, Program Files (x86), Desktop, Downloads, C:\\Apps, C:\\Tools,
++      pasta do proprio Portabilis.
++
++A analise de viabilidade de clonagem atribui uma estrategia:
++  * SANDBOX   - nivel ThinApp (filesystem redirect + registro virtual + mutex guard)
++  * LAUNCHER  - abordagem pragmatica (copia arquivos + exporta chaves + launcher contextual)
++  * MANUAL    - exige intervencao do usuario (servicos/drivers/compartilhados detectados)
++E gera um relatorio detalhado com dificuldades/impossibilidades ANTES da execucao.
++"""
++import os
++import re
++import json
++import fnmatch
++from dataclasses import dataclass, field, asdict
++from typing import List, Optional
++
++try:
++    import winreg
++    HAS_WINREG = True
++except ImportError:
++    HAS_WINREG = False
++
++UNINSTALL_KEYS = [
++    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall") if HAS_WINREG else (0, ""),
++    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") if HAS_WINREG else (0, ""),
++    (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall") if HAS_WINREG else (0, ""),
++]
++
++COMMON_EXE_DIRS_ENV = ["ProgramFiles", "ProgramFiles(x86)", "ProgramData",
++                       "LOCALAPPDATA", "USERPROFILE"]
++COMMON_EXE_SUBDIRS = ["Desktop", "Downloads", "Documents"]
++EXTRA_DIRS = [r"C:\Apps", r"C:\Tools", r"D:\Apps"]
++
++SCAN_MAX_DEPTH = 4          # profundidade maxima da varredura de discos
++SCAN_SKIP_DIRS = {"windows", "$recycle.bin", "system volume information",
++                  "winsxs", "temp", "$windows.~bt", "node_modules", "appdata"}
++
++# Padroes que indicam dependencia profunda -> sandbox completa desaconselhada
++RISK_PATTERNS = {
++    "service": re.compile(r"(srv|service|daemon|agent)\.exe$", re.I),
++    "driver":  re.compile(r"\.sys$", re.I),
++    "shell_ext": re.compile(r"(shellext|contextmenu|shell_ext|iconoverlay)", re.I),
++    "shared_dll_in_system32": re.compile(r"system32|syswow64", re.I),
++}
++
++# Chaves/pastas tipicas onde aplicativos gravam licenca/trial/contadores de uso
++TRIAL_LOCATIONS = [
++    (winreg.HKEY_CURRENT_USER, r"Software") if HAS_WINREG else (0, ""),
++    (winreg.HKEY_LOCAL_MACHINE, r"Software") if HAS_WINREG else (0, ""),
++    ("FILE", r"%APPDATA%"), ("FILE", r"%LOCALAPPDATA%"), ("FILE", r"%PROGRAMDATA%"),
++]
++TRIAL_KEYWORDS = ["trial", "licen", "regist", "activ", "count", "usage", "expire",
++                  "serial", "evaluation", "days_left", "runs", "launch_count", "oobe"]
++
++
++@dataclass
++class InstalledApp:
++    name: str
++    version: str = ""
++    publisher: str = ""
++    install_location: str = ""
++    uninstall_string: str = ""
++    main_exe: str = ""
++    source: str = "registry"          # registry | filescan
++    reg_keys: List[str] = field(default_factory=list)
++    files_found: int = 0
++    size_bytes: int = 0
++    risks: List[str] = field(default_factory=list)
++    strategy: str = "LAUNCHER"        # SANDBOX | LAUNCHER | MANUAL
++    notes: List[str] = field(default_factory=list)
++
++    def to_dict(self):
++        return asdict(self)
++
++
++def _reg_read_value(key, name):
++    try:
++        v, _ = winreg.QueryValueEx(key, name)
++        return v if isinstance(v, str) else str(v)
++    except OSError:
++        return ""
++
++
++def enumerate_registry_apps() -> List[InstalledApp]:
++    apps = []
++    if not HAS_WINREG:
++        return apps
++    for hive, path in UNINSTALL_KEYS:
++        try:
++            root = winreg.OpenKey(hive, path)
++        except OSError:
++            continue
++        i = 0
++        while True:
++            try:
++                subname = winreg.EnumKey(root, i)
++            except OSError:
++                break
++            i += 1
++            try:
++                sk = winreg.OpenKey(root, subname)
++            except OSError:
++                continue
++            name = _reg_read_value(sk, "DisplayName")
++            loc = _reg_read_value(sk, "InstallLocation")
++            exe = _reg_read_value(sk, "DisplayIcon") or _reg_read_value(sk, "UninstallString")
++            if name and not _reg_read_value(sk, "SystemComponent") and ".exe" in (exe.lower() + loc.lower()):
++                full_key = "%s\\%s\\%s" % (
++                    "HKLM" if hive == winreg.HKEY_LOCAL_MACHINE else "HKCU", path, subname)
++                apps.append(InstalledApp(
++                    name=name,
++                    version=_reg_read_value(sk, "DisplayVersion"),
++                    publisher=_reg_read_value(sk, "Publisher"),
++                    install_location=loc,
++                    uninstall_string=_reg_read_value(sk, "UninstallString"),
++                    main_exe=_clean_icon_path(exe),
++                    source="registry",
++                    reg_keys=[full_key],
++                ))
++            winreg.CloseKey(sk)
++        winreg.CloseKey(root)
++    return apps
++
++
++def _clean_icon_path(s: str) -> str:
++    s = s.strip().strip('"')
++    s = re.sub(r",-\d+$", "", s)       # remove ",-XXX" resource index
++    return s
++
++
++def enumerate_filescan_apps() -> List[InstalledApp]:
++    roots = []
++    for env in COMMON_EXE_DIRS_ENV:
++        base = os.environ.get(env)
++        if base:
++            roots.append(base)
++            for sub in COMMON_EXE_SUBDIRS:
++                roots.append(os.path.join(base, sub))
++    roots += EXTRA_DIRS
++    roots.append(os.path.dirname(os.path.abspath(__file__)))
++    apps = []
++    for root in filter(os.path.isdir, roots):
++        for dirpath, dirnames, filenames in os.walk(root):
++            depth = dirpath[len(root):].count(os.sep)
++            if depth >= SCAN_MAX_DEPTH:
++                dirnames[:] = []
++                continue
++            dirnames[:] = [d for d in dirnames if d.lower() not in SCAN_SKIP_DIRS]
++            exes = [f for f in filenames if f.lower().endswith(".exe")]
++            if not exes:
++                continue
++            big = max(exes, key=lambda f: os.path.getsize(os.path.join(dirpath, f))
++                      if os.path.exists(os.path.join(dirpath, f)) else 0)
++            if "unins" in big.lower():
++                exes = [e for e in exes if "unins" not in e.lower()]
++                if not exes:
++                    continue
++                big = exes[0]
++            folder_name = os.path.basename(dirpath)
++            total = sum(os.path.getsize(os.path.join(dirpath, f))
++                        for f in filenames if os.path.exists(os.path.join(dirpath, f)))
++            apps.append(InstalledApp(
++                name=folder_name,
++                install_location=dirpath,
++                main_exe=os.path.join(dirpath, big),
++                source="filescan",
++                files_found=len(filenames),
++                size_bytes=total,
++            ))
++    return apps
++
++
++def analyze_app(app: InstalledApp) -> InstalledApp:
++    """Avalia riscos e define estrategia recomendada + notas do relatorio."""
++    app.notes = []
++    base = app.install_location or os.path.dirname(app.main_exe or "")
++    if base and not os.path.isdir(base):
++        app.notes.append("Pasta de instalacao nao encontrada: %s" % base)
++        app.risks.append("missing_folder")
++        app.strategy = "MANUAL"
++        return app
++    all_files = []
++    if base:
++        for dp, dn, fn in os.walk(base):
++            for f in fn:
++                all_files.append(os.path.join(dp, f))
++    app.files_found = len(all_files)
++    app.size_bytes = sum(os.path.getsize(p) for p in all_files
++                         if os.path.exists(p))
++    has_service = any(RISK_PATTERNS["service"].search(f) for f in map(os.path.basename, all_files))
++    has_driver = any(RISK_PATTERNS["driver"].search(f) for f in all_files)
++    has_shellext = any(RISK_PATTERNS["shell_ext"].search(f.lower()) for f in all_files)
++    if has_service:
++        app.risks.append("service")
++        app.notes.append("Detectado servico: servicos NT nao podem ser virtualizados no MVP -> modo MANUAL.")
++    if has_driver:
++        app.risks.append("driver")
++        app.notes.append("Detectado driver (.sys): kernel-mode nao e clonavel -> modo MANUAL.")
++    if has_shellext:
++        app.risks.append("shell_extension")
++        app.notes.append("Extensao de shell detectada: so funciona registrada no Explorer -> limitacao parcial.")
++    # heuristicas de estrategia
++    if not app.risks and app.source == "registry" and app.size_bytes < 500 * 1024 * 1024:
++        app.strategy = "SANDBOX"
++        app.notes.append("Standalone simples: recomendado SANDBOX completa (arquivos+registro virtualizados).")
++    elif not app.risks:
++        app.strategy = "LAUNCHER"
++        app.notes.append("Recomendado LAUNCHER pragmatico (copia + registro exportado + loader de contexto).")
++    else:
++        app.strategy = "MANUAL"
++    # trial/licenca
++    trials = scan_trial_artifacts(app)
++    if trials:
++        app.notes.append("Artefatos de licenca/trial encontrados (%d): ver lista no relatorio." % len(trials))
++    app.reg_keys += trials[:50]
++    return app
++
++
++def scan_trial_artifacts(app: InstalledApp) -> List[str]:
++    """Varredura generica por chaves/arquivos conhecidos de trial/licenca."""
++    found = []
++    needles = [app.name] + TRIL_KEYWORDS_SAFE(app)
++    if HAS_WINREG:
++        for hive, path in TRIAL_LOCATIONS:
++            if path == "Software":
++                found += _find_reg_matches(hive, path, needles)
++    for env in ("%APPDATA%", "%LOCALAPPDATA%", "%PROGRAMDATA%"):
++        base = os.path.expandvars(env)
++        if os.path.isdir(base):
++            for entry in os.listdir(base):
++                if _matches_needle(entry, needles):
++                    found.append("FILE:%s" % os.path.join(base, entry))
++    return found
++
++
++def TRIL_KEYWORDS_SAFE(app):
++    words = re.split(r"[^A-Za-z0-9]+", app.name)
++    return [w for w in words if len(w) > 3]
++
++
++def _find_reg_matches(hive, path, needles, depth=2):
++    matches = []
++    if not HAS_WINREG or depth < 0:
++        return matches
++    try:
++        key = winreg.OpenKey(hive, path)
++    except OSError:
++        return matches
++    i = 0
++    while True:
++        try:
++            sub = winreg.EnumKey(key, i)
++        except OSError:
++            break
++        i += 1
++        full = "%s\\%s\\%s" % ("HKLM" if hive == winreg.HKEY_LOCAL_MACHINE else "HKCU", path, sub)
++        if _matches_needle(sub, needles) or any(_matches_needle(k, TRIAL_KEYWORDS) for k in [sub]):
++            matches.append("REG:%s" % full)
++        matches += _find_reg_matches(hive, path + "\\" + sub, needles, depth - 1)
++    winreg.CloseKey(key)
++    return matches
++
++
++def _matches_needle(text, needles):
++    t = text.lower()
++    return any(n.lower() in t for n in needles if n)
++
++
++def full_scan(include_registry=True, include_filescan=True) -> List[InstalledApp]:
++    apps: List[InstalledApp] = []
++    if include_registry:
++        apps += enumerate_registry_apps()
++    if include_filescan:
++        apps += enumerate_filescan_apps()
++    # dedupe por nome+pasta
++    seen = {}
++    out = []
++    for a in apps:
++        k = (a.name.lower(), a.install_location.lower())
++        if k in seen:
++            seen[k].reg_keys += a.reg_keys
++            continue
++        seen[k] = a
++        out.append(a)
++    for a in out:
++        analyze_app(a)
++    out.sort(key=lambda x: x.name.lower())
++    return out
++
++
++if __name__ == "__main__":
++    result = full_scan()
++    print(json.dumps([r.to_dict() for r in result], indent=2, ensure_ascii=False))
+diff --git a/portabilis/ui.py b/portabilis/ui.py
+new file mode 100644
+index 0000000..9cfbb3f
+--- /dev/null
++++ b/portabilis/ui.py
+@@ -0,0 +1,425 @@
++# -*- coding: utf-8 -*-
++"""
++Portabilis - Interface grafica (tkinter, empacotada com PyInstaller).
++
++Visual moderno dark, fluxo em 3 etapas:
++  1. DETECTAR  - escolhe fontes (a) registro Uninstall e (b) varredura de .exe
++  2. ANALISAR  - mostra estrategia recomendada (SANDBOX/LAUNCHER/MANUAL),
++                 riscos e artefatos de trial/licenca + relatorio de viabilidade
++  3. CLONAR    - escolha do formato de saida: (a) PASTA (b) SFX (c) ZIP
++                 + opcoes de bypass de contadores de uso/trial
++"""
++import os
++import sys
++import threading
++import traceback
++
++import tkinter as tk
++from tkinter import ttk, filedialog, scrolledtext
++
++sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
++import scan          # noqa: E402
++import clone         # noqa: E402
++
++APP_TITLE = "Portabilis 1.0 MVP"
++
++# ------------------------------------------------------------- tema
++BG      = "#0f1420"   # fundo geral
++BG2     = "#161d2e"   # cards
++BG3     = "#1e2740"   # inputs/hover
++FG      = "#e8ecf5"
++MUTED   = "#8b96b3"
++ACCENT  = "#4f8cff"
++ACCENT2 = "#7c5cff"
++OK      = "#2ecc8f"
++WARN    = "#f5b942"
++ERR     = "#ff5c7a"
++
++FONT      = ("Segoe UI", 10)
++FONT_BOLD = ("Segoe UI", 10, "bold")
++FONT_H1   = ("Segoe UI", 17, "bold")
++FONT_H2   = ("Segoe UI", 12, "bold")
++FONT_MONO = ("Consolas", 9)
++
++
++class Card(ttk.Frame):
++    def __init__(self, master, title="", **kw):
++        super().__init__(master, style="Card.TFrame", **kw)
++        self.pack(fill="x", padx=14, pady=7)
++        if title:
++            ttk.Label(self, text=title, style="CardTitle.TLabel")\
++                .pack(anchor="w", padx=14, pady=(12, 2))
++
++
++class App(tk.Tk):
++    def __init__(self):
++        super().__init__()
++        self.title(APP_TITLE)
++        self.geometry("1024x720")
++        self.minsize(880, 620)
++        self.configure(bg=BG)
++        self.apps = []
++        self.selected = None
++        self._busy = False
++        self._setup_styles()
++        self._build()
++        self.after(300, lambda: self.do_scan())
++
++    # ------------------------------------------------------------ estilos
++    def _setup_styles(self):
++        s = ttk.Style(self)
++        try:
++            s.theme_use("clam")
++        except tk.TclError:
++            pass
++        s.configure(".", background=BG, foreground=FG, font=FONT,
++                    borderwidth=0, focuscolor=ACCENT)
++        s.configure("Toplevel", background=BG)
++        s.configure("Card.TFrame", background=BG2)
++        s.configure("CardTitle.TLabel", background=BG2, foreground=ACCENT,
++                    font=FONT_H2)
++        s.configure("TLabel", background=BG, foreground=FG)
++        s.configure("Muted.TLabel", background=BG, foreground=MUTED, font=FONT)
++        s.configure("H1.TLabel", background=BG, foreground=FG, font=FONT_H1)
++        s.configure("TCheckbutton", background=BG2, foreground=FG,
++                    activebackground=BG2, activeforeground=FG)
++        s.map("TCheckbutton", background=[("active", BG2)])
++        s.configure("TNotebook", background=BG, tabmargins=(14, 8, 14, 0))
++        s.configure("TNotebook.Tab", background=BG3, foreground=MUTED,
++                    padding=(18, 8), font=FONT_BOLD)
++        s.map("TNotebook.Tab", background=[("selected", ACCENT)],
++              foreground=[("selected", "#ffffff")])
++        s.configure("Treeview", background=BG3, fieldbackground=BG3,
++                    foreground=FG, rowheight=30, font=FONT)
++        s.configure("Treeview.Heading", background=BG2, foreground=MUTED,
++                    font=FONT_BOLD, relief="flat")
++        s.map("Treeview", background=[("selected", ACCENT)],
++              foreground=[("selected", "#ffffff")])
++        s.configure("TCombobox", fieldbackground=BG3, background=BG3,
++                    foreground=FG, arrowcolor=FG)
++        s.configure("Horizontal.TProgressbar", troughcolor=BG3,
++                    background=ACCENT, lightcolor=ACCENT, thickness=8)
++        s.configure("Accent.TButton", background=ACCENT, foreground="#ffffff",
++                    font=FONT_BOLD, padding=(16, 9))
++        s.map("Accent.TButton", background=[("active", "#3a76e8"),
++                                            ("disabled", BG3)],
++              foreground=[("disabled", MUTED)])
++        s.configure("Ghost.TButton", background=BG3, foreground=FG,
++                    padding=(14, 9))
++        s.map("Ghost.TButton", background=[("active", "#2a3555")])
++
++    def _btn(self, parent, text, cmd, accent=True):
++        b = tk.Button(parent, text=text, command=cmd, bd=0, cursor="hand2",
++                      font=FONT_BOLD, padx=16, pady=8,
++                      bg=ACCENT if accent else BG3,
++                      fg="#ffffff" if accent else FG,
++                      activebackground=ACCENT2 if accent else "#2a3555",
++                      activeforeground="#ffffff")
++        return b
++
++    # ------------------------------------------------------------ layout
++    def _build(self):
++        header = tk.Frame(self, bg=BG)
++        header.pack(fill="x", padx=18, pady=(16, 6))
++        logo = tk.Canvas(header, width=40, height=40, bg=BG, highlightthickness=0)
++        logo.pack(side="left", padx=(0, 12))
++        logo.create_oval(3, 3, 37, 37, fill=ACCENT, outline=ACCENT2, width=3)
++        logo.create_text(20, 20, text="P", fill="#fff", font=("Segoe UI", 17, "bold"))
++        tbox = tk.Frame(header, bg=BG)
++        tbox.pack(side="left")
++        tk.Label(tbox, text="Portabilis", bg=BG, fg=FG, font=FONT_H1).pack(anchor="w")
++        tk.Label(tbox, text="Clone programas instalados e execute-os como portaveis",
++                 bg=BG, fg=MUTED, font=FONT).pack(anchor="w")
++        self.status_var = tk.StringVar(value="Pronto")
++        tk.Label(header, textvariable=self.status_var, bg=BG, fg=OK,
++                 font=FONT_BOLD).pack(side="right")
++
++        nb = ttk.Notebook(self)
++        nb.pack(fill="both", expand=True, padx=14, pady=(6, 0))
++
++        # ---- aba 1: deteccao ----------------------------------------
++        tab1 = tk.Frame(nb, bg=BG); nb.add(tab1, text="  1 · Detectar  ")
++        card = Card(tab1, "Fontes de deteccao (item 8)")
++        self.inc_reg = tk.BooleanVar(value=True)
++        self.inc_file = tk.BooleanVar(value=True)
++        for var, txt in ((self.inc_reg,
++                          "(a) Registro — HKLM/HKCU\\...\\CurrentVersion\\Uninstall "
++                          "(mesma fonte do Painel de Controle)"),
++                         (self.inc_file,
++                          "(b) Varredura de .exe em pastas comuns "
++                          "(Program Files, Desktop, Downloads, C:\\Apps...)")):
++            tk.Checkbutton(card, text=txt, variable=var, bg=BG2, fg=FG,
++                           selectcolor=BG3, activebackground=BG2,
++                           activeforeground=FG, font=FONT, anchor="w")\
++                .pack(fill="x", padx=14, pady=3)
++            card.columnconfigure(0, weight=1)
++        row = tk.Frame(card, bg=BG2); row.pack(fill="x", padx=14, pady=10)
++        self._btn(row, "Escanear programas", lambda: self.do_scan()).pack(side="left")
++        self.progress = ttk.Progressbar(card, mode="indeterminate",
++                                        style="Horizontal.TProgressbar")
++        self.progress.pack(fill="x", padx=14, pady=(0, 12))
++
++        cols = ("name", "version", "publisher", "source", "strategy", "size")
++        grid_wrap = tk.Frame(tab1, bg=BG); grid_wrap.pack(fill="both", expand=True,
++                                                          padx=14, pady=(0, 4))
++        self.tree = ttk.Treeview(grid_wrap, columns=cols, show="headings",
++                                 selectmode="browse")
++        heads = {"name": "Programa", "version": "Versao", "publisher": "Publicador",
++                 "source": "Origem", "strategy": "Estrategia", "size": "Tamanho"}
++        widths = {"name": 260, "version": 90, "publisher": 150, "source": 110,
++                  "strategy": 110, "size": 100}
++        for c in cols:
++            self.tree.heading(c, text=heads[c])
++            self.tree.column(c, width=widths[c], anchor="w")
++        tagmap = [("SANDBOX", OK), ("LAUNCHER", WARN), ("MANUAL", ERR)]
++        for name, color in tagmap:
++            self.tree.tag_configure(name, foreground=color)
++        vsb = ttk.Scrollbar(grid_wrap, orient="vertical", command=self.tree.yview)
++        self.tree.configure(yscrollcommand=vsb.set)
++        self.tree.pack(side="left", fill="both", expand=True)
++        vsb.pack(side="right", fill="y")
++        self.tree.bind("<<TreeviewSelect>>", self._on_select)
++        self.tree.bind("<Double-1>", lambda e: self.tab2.select())
++
++        # ---- aba 2: analise -----------------------------------------
++        tab2 = tk.Frame(nb, bg=BG); nb.add(tab2, text="  2 · Analisar  ")
++        self.tab2 = tab2
++        info = Card(tab2, "Diagnostico de viabilidade (gerado ANTES da execucao)")
++        self.detail = scrolledtext.ScrolledText(
++            info, height=12, bg=BG3, fg=FG, insertbackground=FG, bd=0,
++            font=FONT_MONO, state="disabled")
++        self.detail.pack(fill="both", expand=True, padx=14, pady=(4, 12))
++
++        opts = Card(tab2, "Opcoes de clonagem")
++        g1 = tk.Frame(opts, bg=BG2); g1.pack(fill="x", padx=14, pady=6)
++        tk.Label(g1, text="Estrategia:", bg=BG2, fg=FG, font=FONT).pack(side="left")
++        self.strategy_var = tk.StringVar(value="LAUNCHER")
++        for v, lbl in (("SANDBOX", "Sandbox completa"),
++                       ("LAUNCHER", "Launcher pragmatico"),
++                       ("MANUAL", "Manual (so relatorio)")):
++            tk.Radiobutton(g1, text=lbl, value=v, variable=self.strategy_var,
++                           bg=BG2, fg=FG, selectcolor=BG3, activebackground=BG2,
++                           activeforeground=FG, font=FONT).pack(side="left", padx=8)
++        g2 = tk.Frame(opts, bg=BG2); g2.pack(fill="x", padx=14, pady=6)
++        self.trial_on = tk.BooleanVar(value=False)
++        tk.Checkbutton(g2, text="(item 7) Reset de contadores de uso / trial:",
++                       variable=self.trial_on, bg=BG2, fg=FG, selectcolor=BG3,
++                       activebackground=BG2, activeforeground=FG, font=FONT)\
++            .pack(side="left")
++        self.trial_mode = tk.StringVar(value="generico")
++        cb = ttk.Combobox(g2, textvariable=self.trial_mode, state="readonly",
++                          values=["generico", "heuristica-avancada"], width=20)
++        cb.pack(side="left", padx=10)
++        tk.Label(g2, text="generico = zera contadores conhecidos (seguro) | "
++                         "heuristica = padroes de trial mais agressivos",
++                 bg=BG2, fg=MUTED, font=("Segoe UI", 9)).pack(side="left")
++        note = tk.Label(
++            opts,
++            text="Atencao: use apenas em software que voce possui/licenciou. O reset "
++                 "atua so sobre artefatos detectados; protecoes avancadas serao "
++                 "reportadas como impossibilidade no relatorio.",
++            bg=BG2, fg=MUTED, font=("Segoe UI", 9), wraplength=900, justify="left")
++        note.pack(anchor="w", padx=14, pady=(2, 12))
++
++        # ---- aba 3: clonar -------------------------------------------
++        tab3 = tk.Frame(nb, bg=BG); nb.add(tab3, text="  3 · Clonar  ")
++        self.tab3 = tab3
++        out = Card(tab3, "Formato de saida (item 9)")
++        self.fmt_var = tk.StringVar(value="PASTA")
++        for v, lbl in (("PASTA", "(a) Pasta com arquivos + PortabilisLauncher.exe"),
++                       ("SFX",   "(b) Arnico .exe autoextrativo (SFX)"),
++                       ("ZIP",   "(c) Pacote comprimido para extrair e executar")):
++            tk.Radiobutton(out, text=lbl.replace("Arnico", "Unico"), value=v,
++                           variable=self.fmt_var, bg=BG2, fg=FG, selectcolor=BG3,
++                           activebackground=BG2, activeforeground=FG,
++                           font=FONT, anchor="w").pack(fill="x", padx=14, pady=3)
++        out.columnconfigure(0, weight=1)
++        row2 = tk.Frame(out, bg=BG2); row2.pack(fill="x", padx=14, pady=8)
++        tk.Label(row2, text="Salvar em:", bg=BG2, fg=FG, font=FONT).pack(side="left")
++        self.out_dir = tk.StringVar(value=os.path.join(
++            os.path.expanduser("~"), "Desktop", "PortabilisOut"))
++        tk.Entry(row2, textvariable=self.out_dir, bg=BG3, fg=FG, insertbackground=FG,
++                 bd=0, font=FONT).pack(side="left", fill="x", expand=True,
++                                       padx=8, ipady=6)
++        self._btn(row2, "...", self._pick_dir, accent=False).pack(side="left")
++        row3 = tk.Frame(out, bg=BG2); row3.pack(fill="x", padx=14, pady=(4, 14))
++        self.clone_btn = self._btn(row3, "CLONAR PROGRAMA", self.do_clone)
++        self.clone_btn.pack(side="left")
++        self._btn(row3, "Ver relatorio", self.show_report, accent=False)\
++            .pack(side="left", padx=8)
++        logcard = Card(tab3, "Log de execucao")
++        self.log = scrolledtext.ScrolledText(
++            logcard, height=10, bg=BG3, fg=FG, insertbackground=FG, bd=0,
++            font=FONT_MONO, state="disabled")
++        self.log.pack(fill="both", expand=True, padx=14, pady=(4, 12))
++
++    # ------------------------------------------------------------ helpers
++    def _pick_dir(self):
++        d = filedialog.askdirectory(initialdir=os.path.expanduser("~"))
++        if d:
++            self.out_dir.set(d)
++
++    def _log(self, msg):
++        self.log.configure(state="normal")
++        self.log.insert("end", msg + "\n")
++        self.log.see("end")
++        self.log.configure(state="disabled")
++
++    def _set_status(self, text, color=OK):
++        self.status_var.set(text)
++
++    def _busy_guard(self, busy=True, label="Trabalhando..."):
++        self._busy = busy
++        if busy:
++            self.progress.start(12)
++            self._set_status(label, WARN)
++        else:
++            self.progress.stop()
++            self._set_status("Pronto", OK)
++
++    # ------------------------------------------------------------ acoes
++    def do_scan(self):
++        if self._busy:
++            return
++        inc_reg, inc_file = self.inc_reg.get(), self.inc_file.get()
++        if not (inc_reg or inc_file):
++            self._set_status("Escolha ao menos uma fonte de deteccao", ERR)
++            return
++
++        def work():
++            try:
++                apps = scan.full_scan(inc_reg, inc_file)
++                self.after(0, lambda: self._scan_done(apps))
++            except Exception:
++                err = traceback.format_exc()
++                self.after(0, lambda: self._log("ERRO no scan:\n" + err))
++                self.after(0, lambda: self._busy_guard(False))
++        self._busy_guard(True, "Escaneando...")
++        threading.Thread(target=work, daemon=True).start()
++
++    def _fmt_size(self, b):
++        if b > 1e9:
++            return "%.1f GB" % (b / 1e9)
++        if b > 1e6:
++            return "%.0f MB" % (b / 1e6)
++        return "%.0f KB" % (b / 1e3)
++
++    def _scan_done(self, apps):
++        self.apps = apps
++        self.tree.delete(*self.tree.get_children())
++        for i, a in enumerate(apps):
++            src = "Registro" if a.source == "registry" else "Varredura .exe"
++            self.tree.insert("", "end", iid=str(i), values=(
++                a.name, a.version, a.publisher, src, a.strategy,
++                self._fmt_size(a.size_bytes)), tags=(a.strategy,))
++        self._busy_guard(False)
++        self._set_status("%d programa(s) encontrados" % len(apps), OK)
++        self._log("[scan] %d programas detectados (%s)." % (
++            len(apps),
++            "+".join([f for f, on in (("registro", self.inc_reg.get()),
++                                      ("varredura", self.inc_file.get())) if on])))
++
++    def _on_select(self, _evt=None):
++        sel = self.tree.selection()
++        if not sel:
++            return
++        idx = int(sel[0])
++        self.selected = self.apps[idx]
++        a = self.selected
++        self.strategy_var.set(a.strategy)
++        txt = ["Programa....: %s %s" % (a.name, a.version),
++               "Publicador..: %s" % (a.publisher or "-"),
++               "Local.......: %s" % (a.install_location or a.main_exe),
++               "Origem......: %s" % ("Registro (Uninstall)" if a.source == "registry"
++                                     else "Varredura de .exe"),
++               "Conteudo....: %d arquivos (%s)" % (a.files_found,
++                                                   self._fmt_size(a.size_bytes)),
++               "Estrategia recomendada: %s" % a.strategy,
++               "-" * 64, "DIAGNOSTICO:"]
++        for n in a.notes:
++            txt.append("  • " + n)
++        if a.risks:
++            txt.append("RISCOS: " + ", ".join(a.risks))
++        trials = [k for k in a.reg_keys if k.startswith(("REG:", "FILE:"))]
++        txt.append("-" * 64)
++        txt.append("ARTEFATOS DE LICENCA/TRIAL (varredura generica): %d" % len(trials))
++        txt += ["  " + t for t in trials[:30]]
++        self.detail.configure(state="normal")
++        self.detail.delete("1.0", "end")
++        self.detail.insert("1.0", "\n".join(txt))
++        self.detail.configure(state="disabled")
++
++    def do_clone(self):
++        if self._busy:
++            return
++        if not self.selected:
++            self._set_status("Selecione um programa na aba Detectar", ERR)
++            return
++        app = self.selected
++        fmt = self.fmt_var.get()
++        strategy = self.strategy_var.get()
++        trial = self.trial_on.get()
++        mode = self.trial_mode.get()
++        out = self.out_dir.get()
++        if strategy == "MANUAL":
++            self.show_report()
++            return
++        try:
++            os.makedirs(out, exist_ok=True)
++        except OSError as e:
++            self._set_status("Pasta de saida invalida: %s" % e, ERR)
++            return
++
++        def prog(n, msg):
++            self.after(0, lambda: self._log("[%6d] %s" % (n, msg)))
++
++        def work():
++            try:
++                art = clone.clone_program(app, out, fmt, strategy, trial, mode, prog)
++                self.after(0, lambda: self._clone_done(str(art)))
++            except clone.CloneError as e:
++                self.after(0, lambda: self._log("BLOQUEADO: %s" % e))
++                self.after(0, lambda e=str(e): self._set_status(
++                    "Clonacao bloqueada: " + e.split("\n")[0][:60], ERR))
++                self.after(0, lambda: self._busy_guard(False))
++            except Exception:
++                err = traceback.format_exc()
++                self.after(0, lambda: self._log("ERRO:\n" + err))
++                self.after(0, lambda: self._busy_guard(False))
++        self._busy_guard(True, "Clonando %s..." % app.name)
++        self.tab3.nametowidget(self.tab3.winfo_children()[0])  # noop guard
++        threading.Thread(target=work, daemon=True).start()
++
++    def _clone_done(self, artifact):
++        self._busy_guard(False)
++        self._set_status("Clone concluido!", OK)
++        self._log("=" * 60)
++        self._log("ARTEFATO GERADO: %s" % artifact)
++        self._log("Abra o pacote e execute PortabilisLauncher.exe.")
++        self._log("Leia RELATORIO.txt antes da primeira execucao.")
++        self._log("=" * 60)
++
++    def show_report(self):
++        if not self.selected:
++            return
++        win = tk.Toplevel(self)
++        win.title("Relatorio de viabilidade - %s" % self.selected.name)
++        win.geometry("760x560"); win.configure(bg=BG)
++        st = scrolledtext.ScrolledText(win, bg=BG3, fg=FG, bd=0, font=FONT_MONO)
++        st.pack(fill="both", expand=True, padx=10, pady=10)
++        lines = ["PORTABILIS - PRE-VISUALIZACAO DO RELATORIO (antes de clonar)",
++                 "=" * 64]
++        lines += self.selected.notes or ["Sem avisos."]
++        if self.selected.risks:
++            lines.append("Riscos: " + ", ".join(self.selected.risks))
++        st.insert("1.0", "\n".join(lines))
++        st.configure(state="disabled")
++
++
++def main():
++    app = App()
++    app.mainloop()
++
++
++if __name__ == "__main__":
++    main()
+-- 
+2.39.5
+
+
+From 6b508f469779527e88cf3c1d1eabff538a246e3d Mon Sep 17 00:00:00 2001
+From: "qwen.ai[bot]" <qwenlm-intl@service.alibaba.com>
+Date: Thu, 24 Sep 2026 01:53:57 +0000
+Subject: [PATCH 2/2] docs: README principal com instrucoes de build, uso
+ GUI/CLI e saida do Portabilis
+
+---
+ README.md | 90 ++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 89 insertions(+), 1 deletion(-)
+
+diff --git a/README.md b/README.md
+index fb8a2ff..30a206b 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,89 @@
+-# portablis
+\ No newline at end of file
++# Portabilis
++
++Clone programas instalados no Windows em versões **portáteis** — sem instalação, com registro e ambiente isolados. MVP focado no Cool Edit Pro 2.1, mas funciona para a maioria dos programas standalone.
++
++![Plataforma](https://img.shields.io/badge/plataforma-Windows-blue) ![Python](https://img.shields.io/badge/Python-3.8%2B-green) ![Licença](https://img.shields.io/badge/licença-MIT-lightgrey)
++
++## Recursos
++
++- **Detecção de programas**: varredura do registro (`HKLM\SOFTWARE\...\Uninstall`) + busca de `.exe` portáteis em pastas comuns (arquivos `.lnk` do Menu Iniciar também são resolvidos).
++- **Análise de viabilidade**: antes de clonar, o Portabilis gera um relatório apontando dependências críticas (serviços, drivers, DLLs em System32, complementos shell) e recomenda a melhor estratégia: `SANDBOX`, `LAUNCHER` ou `MANUAL`.
++- **Clonagem pragmática**: copia os arquivos do programa, exporta as chaves de registro relevantes para `.reg` e embute um **launcher** que prepara o contexto (registro local, AppData/ProgramData redirecionados, ponte de DLLs via `PATH`) e executa o programa.
++- **Reset de contadores de trial** (opcional): varredura genérica de chaves/valores conhecidos + modo heurístico avançado para detectar padrões de licença/timestamp.
++- **3 formatos de saída**:
++  - **(a) PASTA** — pasta com todos os arquivos + `Launch_<App>.exe/.bat`;
++  - **(b) SFX** — único `.exe` autoextraível (gerado com IExpress nativo do Windows);
++  - **(c) ZIP** — pacote comprimido pronto para extrair e usar.
++- **Interface gráfica moderna** (dark theme, tkinter) e **CLI** para automação.
++
++## Como gerar o `Portabilis.exe` portable
++
++No Windows, com Python 3.8+ instalado:
++
++```bat
++cd portabilis
++build_exe.bat
++```
++
++O script instala o PyInstaller e gera `dist\Portabilis\Portabilis.exe` — um executável portátil (pasta `dist` completa, copie para um pendrive e execute direto).
++
++## Uso rápido
++
++**GUI:** dê dois cliques em `Portabilis.exe` (ou `python main.py`). A janela tem 3 etapas: **Detectar → Analisar → Clonar**.
++
++**CLI:**
++
++```bat
++:: Listar programas detectados
++python cli.py --scan
++
++:: Análise + clonagem completa (formato pasta)
++python cli.py --clone "Cool Edit Pro" --out D:\Portable --format pasta
++
++:: Formatos alternativos
++python cli.py --clone "Cool Edit Pro" --out D:\Portable --format sfx
++python cli.py --clone "Cool Edit Pro" --out D:\Portable --format zip
++
++:: Com reset de trial (genérico ou heurístico avançado)
++python cli.py --clone "Cool Edit Pro" --out D:\Portable --reset-trial advanced
++```
++
++## Estrutura do projeto
++
++```
++portabilis/
++├── main.py            # entrada da GUI
++├── ui.py              # interface dark em 3 etapas
++├── scan.py            # detecção (registro Uninstall + .exe portáteis)
++├── clone.py           # análise de viabilidade + motor de clonagem + launcher
++├── cli.py             # linha de comando
++├── build_exe.bat      # build do executável portable (PyInstaller)
++├── Portabilis.spec    # spec do PyInstaller
++└── assets/portabilis.ico
++```
++
++## Saída da clonagem
++
++```
++<App>_Portable/
++├── app/                 # arquivos copiados do programa
++├── registry/            # chaves exportadas (.reg)
++├── data/                # AppData/ProgramData redirecionados
++├── Launch_<App>.bat     # launcher (fonte)
++├── Launch_<App>.exe     # launcher compilado (se houver PyInstaller)
++└── RELATORIO.txt        # log detalhado da clonagem
++```
++
++## Limitações conhecidas
++
++Ferramentas comerciais como VMware ThinApp, Cameyo e Spoon Studio levam anos de desenvolvimento para capturar 100% do comportamento de um sistema. O Portabilis entrega uma solução pragmática que cobre bem programas standalone; softwares com drivers, serviços ou integrações profundas de shell podem exigir tratamento manual (o relatório de análise indica exatamente isso).
++
++## Requisitos
++
++- Windows 7/8/10/11 (execução)
++- Python 3.8+ apenas para gerar o `.exe` via `build_exe.bat` (tkinter já incluído no instalador padrão do Python)
++- Executar preferencialmente como administrador para exportar todo o registro
++
++## Licença
++
++MIT — use por sua conta e risco. Respeite as licenças de software dos programas que você clona.
+-- 
+2.39.5
+
