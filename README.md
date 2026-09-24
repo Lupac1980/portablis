@@ -1,12 +1,12 @@
 # Portabilis
 
-Clone programas instalados no Windows em versões **portáteis** — sem instalação, com registro e ambiente isolados. MVP focado no Cool Edit Pro 2.1, mas funciona para a maioria dos programas standalone.
+Clone programas instalados no Windows em versões **portáteis** — sem instalação, com registro e ambiente isolados. Funciona para a maioria dos programas standalone.
 
 ![Plataforma](https://img.shields.io/badge/plataforma-Windows-blue) ![Python](https://img.shields.io/badge/Python-3.8%2B-green) ![Licença](https://img.shields.io/badge/licença-MIT-lightgrey)
 
 ## Recursos
 
-- **Detecção de programas**: varredura do registro (`HKLM\SOFTWARE\...\Uninstall`) + busca de `.exe` portáteis em pastas comuns (arquivos `.lnk` do Menu Iniciar também são resolvidos).
+- **Detecção de programas**: lista exatamente os mesmos programas do **Painel de Controle > Desinstalar um programa** — percorre `HKLM\SOFTWARE\...\Uninstall` nas visões 64-bit **e** 32-bit/WOW64 (pega aplicativos de 32 bits) mais `HKCU`, resolvendo o executável principal via atalhos do Menu Iniciar (`.lnk`), `DisplayIcon` ou pasta de instalação. Opcionalmente também busca `.exe` soltos em pastas comuns (Desktop, Downloads, C:\Apps...).
 - **Análise de viabilidade**: antes de clonar, o Portabilis gera um relatório apontando dependências críticas (serviços, drivers, DLLs em System32, complementos shell) e recomenda a melhor estratégia: `SANDBOX`, `LAUNCHER` ou `MANUAL`.
 - **Clonagem pragmática**: copia os arquivos do programa, exporta as chaves de registro relevantes para `.reg` e embute um **launcher** que prepara o contexto (registro local, AppData/ProgramData redirecionados, ponte de DLLs via `PATH`) e executa o programa.
 - **Reset de contadores de trial** (opcional): varredura genérica de chaves/valores conhecidos + modo heurístico avançado para detectar padrões de licença/timestamp.
@@ -38,14 +38,14 @@ O script instala o PyInstaller e gera `dist\Portabilis\Portabilis.exe` — um ex
 python cli.py --scan
 
 :: Análise + clonagem completa (formato pasta)
-python cli.py --clone "Cool Edit Pro" --out D:\Portable --format pasta
+python cli.py --clone "Nome do Programa" --out D:\Portable --format pasta
 
 :: Formatos alternativos
-python cli.py --clone "Cool Edit Pro" --out D:\Portable --format sfx
-python cli.py --clone "Cool Edit Pro" --out D:\Portable --format zip
+python cli.py --clone "Nome do Programa" --out D:\Portable --format sfx
+python cli.py --clone "Nome do Programa" --out D:\Portable --format zip
 
 :: Com reset de trial (genérico ou heurístico avançado)
-python cli.py --clone "Cool Edit Pro" --out D:\Portable --reset-trial advanced
+python cli.py --clone "Nome do Programa" --out D:\Portable --reset-trial advanced
 ```
 
 ## Estrutura do projeto

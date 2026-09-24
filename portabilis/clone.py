@@ -24,6 +24,15 @@ import datetime
 from pathlib import Path
 from typing import List, Optional
 
+def _fmt_source(src):
+    """Rotulo amigavel da origem do app no relatorio de clone."""
+    if src == 'manual':
+        return 'Selecao manual'
+    if str(src).lower().startswith('registro'):
+        return str(src) + ' - Painel de Controle'
+    return 'Varredura de .exe'
+
+
 IS_WIN = sys.platform == "win32"
 if IS_WIN:
     import winreg
@@ -343,9 +352,7 @@ def build_report(app, strategy, output_format, trial_info, warnings, blocked) ->
     lines.append("=" * 60)
     lines.append("Programa.....: %s %s" % (app.name, app.version))
     lines.append("Publicador...: %s" % (app.publisher or "-"))
-    lines.append("Origem.......: %s" % {"registry": "Registro (Uninstall)",
-                                        "manual": "Selecao manual"}.get(
-                                            app.source, "Varredura de .exe"))
+    lines.append("Origem.......: %s" % _fmt_source(app.source))
     lines.append("Local........: %s" % (app.install_location or app.main_exe))
     lines.append("Tamanho......: %.1f MB em %d arquivos"
                  % (app.size_bytes / 1e6, app.files_found))
