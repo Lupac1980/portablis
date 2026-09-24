@@ -28,11 +28,38 @@ try:
 except ImportError:
     HAS_WINREG = False
 
-UNINSTALL_KEYS = [
-    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall") if HAS_WINREG else (0, ""),
-    (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall") if HAS_WINREG else (0, ""),
-    (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall") if HAS_WINREG else (0, ""),
-]
+# Fontes de registro usadas pelo Painel de Controle ("Desinstalar um programa"):
+#   - HKLM\SOFTWARE\...\Uninstall          -> visao nativa (64 bits no Windows 64)
+#   - HKLM\SOFTWARE\...\Uninstall (32-bit) -> visão WOW6432Node: apps 32 bits
+#     (aplicativos legados de 32 bits). Enumerada explicitamente com KEY_WOW64_32KEY para
+#     funcionar igual ao Painel de Controle independentemente da arquitetura do
+#     processo do Portabilis.
+#   - HKCU\SOFTWARE\...\Uninstall          -> installs por usuario
+UNINSTALL_BASE = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+
+def _uninstall_scopes():
+    """Retorna [(hive, path, access_flag, rotulo_origem), ...] cobrindo todas
+    as origens que o Painel de Controle lista."""
+    if not HAS_WINREG:
+        return []
+    k64 = getattr(winreg, "KEY_WOW64_64KEY", 0x0100)
+    k32 = getattr(winreg, "KEY_WOW64_32KEY", 0x0200)
+    scopes = [
+        (winreg.HKEY_LOCAL_MACHINE, UNINSTALL_BASE, k64, "Registro (HKLM 64-bit)"),
+        (winreg.HKEY_LOCAL_MACHINE, UNINSTALL_BASE, k32, "Registro (HKLM 32-bit/WOW64)"),
+        (winreg.HKEY_CURRENT_USER,  UNINSTALL_BASE, k64, "Registro (HKCU)"),
+    ]
+    # fallback historico: chave fisica WOW6432Node
+    scopes.append((winreg.HKEY_LOCAL_MACHINE,
+                   r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+                   0, "Registro (WOW6432Node)"))
+    return scopes
+
+def is_registry_source(source: str) -> bool:
+    """True para qualquer origem vinda do registro Uninstall (HKLM 64,
+    HKLM 32/WOW64, HKCU ou WOW6432Node)."""
+    return (source or "").lower().startswith("registro")
+
 
 COMMON_EXE_DIRS_ENV = ["ProgramFiles", "ProgramFiles(x86)", "ProgramData",
                        "LOCALAPPDATA", "USERPROFILE"]
@@ -69,7 +96,7 @@ class InstalledApp:
     install_location: str = ""
     uninstall_string: str = ""
     main_exe: str = ""
-    source: str = "registry"          # registry | filescan
+    source: str = "registry"          # Registro (Painel de Controle) | varredura .exe | manual
     reg_keys: List[str] = field(default_factory=list)
     files_found: int = 0
     size_bytes: int = 0
@@ -89,13 +116,101 @@ def _reg_read_value(key, name):
         return ""
 
 
+def _resolve_app_exe(name, loc, icon, uninstall):
+    """Determina o executavel principal do app, imitando a resolucao do
+    Painel de Controle: InstallLocation + atalhos do Menu Iniciar ->
+    DisplayIcon -> pasta de instalacao."""
+    # 1) atalhos .lnk do Menu Iniciar apontando para o programa
+    lnk = _find_startmenu_target(name)
+    if lnk:
+        return lnk
+    # 2) DisplayIcon / UninstallString quando forem um .exe valido existente
+    for cand in (_clean_icon_path(icon), uninstall):
+        p = _expand(cand)
+        if p and p.lower().endswith(".exe") and os.path.isfile(p):
+            return p
+    # 3) maior .exe dentro de InstallLocation
+    base = _expand(loc)
+    if base and os.path.isdir(base):
+        best, best_sz = "", -1
+        for dp, dn, fn in os.walk(base):
+            for f in fn:
+                if f.lower().endswith(".exe") and "unins" not in f.lower():
+                    fp = os.path.join(dp, f)
+                    try:
+                        sz = os.path.getsize(fp)
+                    except OSError:
+                        continue
+                    if sz > best_sz:
+                        best, best_sz = fp, sz
+        if best:
+            return best
+    return _clean_icon_path(icon)
+
+
+def _expand(p):
+    return os.path.expandvars(p.strip().strip('"')) if p else ""
+
+
+def _find_startmenu_target(name):
+    """Procura atalhos .lnk no Menu Iniciar cujo destino seja um .exe da pasta
+    do programa com o nome pesquisado (igual faz o Painel de Controle ao
+    exibir 'Abrir local de arquivo')."""
+    import glob
+    bases = [os.path.join(os.environ.get("ProgramData", ""), r"Microsoft\Windows\Start Menu\Programs"),
+             os.path.join(os.environ.get("APPDATA", ""), r"Microsoft\Windows\Start Menu\Programs")]
+    needle = re.sub(r"[^a-z0-9]", "", (name or "").lower())
+    if len(needle) < 4:
+        return ""
+    for base in filter(os.path.isdir, bases):
+        for lnk in glob.glob(os.path.join(base, "**", "*.lnk"), recursive=True):
+            target = _lnk_target(lnk)
+            if not target:
+                continue
+            tkey = re.sub(r"[^a-z0-9]", "", os.path.splitext(os.path.basename(target))[0].lower())
+            if tkey and (needle in tkey or tkey in needle):
+                return target
+    return ""
+
+
+def _lnk_target(path):
+    """Extrai o caminho do destino de um atalho .lnk sem dependencias externas
+    (parse minimo da estrutura Shell Link, bloco TARGET/Distributed Link)."""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(2048)
+        if len(data) < 76 or data[:4] != b"\x4c\x00\x00\x00":
+            return ""
+        flags = int.from_bytes(data[20:24], "little")
+        pos = 76
+        if flags & 0x01:      # HasLinkTargetIDList
+            n = int.from_bytes(data[pos:pos + 2], "little")
+            pos += 2 + n
+        if not (flags & 0x02):  # sem TargetPath
+            return ""
+        off = int.from_bytes(data[pos:pos + 4], "little")
+        s, e = pos + off, data.find(b"\x00\x00", pos + off)
+        target = data[pos + off:e].decode("utf-16-le", "ignore").split("\x00")[0]
+        return target if target.lower().endswith(".exe") and os.path.isfile(target) else ""
+    except Exception:
+        return ""
+
+
 def enumerate_registry_apps() -> List[InstalledApp]:
+    """Lista exatamente os programas que o Painel de Controle exibe em
+    'Desinstalar um programa': percorre HKLM (visao 64-bit E 32-bit/WOW64,
+    para pegar aplicativos de 32 bits) e HKCU, ignorando
+    componentes de sistema e entradas sem DisplayName — mesma regra do shell.
+    """
     apps = []
+    seen = set()
     if not HAS_WINREG:
         return apps
-    for hive, path in UNINSTALL_KEYS:
+    for hive, path, access, origin in _uninstall_scopes():
         try:
-            root = winreg.OpenKey(hive, path)
+            root = winreg.OpenKey(hive, path, 0,
+                                  winreg.KEY_READ | access) if access \
+                else winreg.OpenKey(hive, path)
         except OSError:
             continue
         i = 0
@@ -106,23 +221,43 @@ def enumerate_registry_apps() -> List[InstalledApp]:
                 break
             i += 1
             try:
-                sk = winreg.OpenKey(root, subname)
+                sk = winreg.OpenKey(root, subname, 0,
+                                    winreg.KEY_READ | access) if access \
+                    else winreg.OpenKey(root, subname)
             except OSError:
                 continue
             name = _reg_read_value(sk, "DisplayName")
+            syscomp = _reg_read_value(sk, "SystemComponent")
+            parent = _reg_read_value(sk, "ParentKeyName")     # updates de Windows
+            release = _reg_read_value(sk, "ReleaseType")      # hotfixes/QFE
+            wininstaller = _reg_read_value(sk, "WindowsInstaller")
             loc = _reg_read_value(sk, "InstallLocation")
-            exe = _reg_read_value(sk, "DisplayIcon") or _reg_read_value(sk, "UninstallString")
-            if name and not _reg_read_value(sk, "SystemComponent") and ".exe" in (exe.lower() + loc.lower()):
+            icon = _reg_read_value(sk, "DisplayIcon")
+            uninstall = _reg_read_value(sk, "UninstallString")
+            hidden = _reg_read_value(sk, "Hidden")
+            exe = icon or uninstall
+            key_id = (name.lower(), loc.lower())
+            ok_name = bool(name) and syscomp != "1" and not parent and \
+                release not in ("Security Update", "Update Rollups", "hotfix") and \
+                hidden != "1"
+            # Assim como o Painel, exibimos mesmo sem .exe aparente; mas se nao
+            # houver NENHUMA pista de executavel/pasta e for apenas um MSI sem
+            # InstallLocation, ainda listamos (clone pode usar Menu Iniciar).
+            has_body = (".exe" in (exe.lower() + loc.lower())
+                        or bool(_find_startmenu_target(name))
+                        or (bool(loc) and os.path.isdir(_expand(loc))))
+            if ok_name and has_body and key_id not in seen:
+                seen.add(key_id)
                 full_key = "%s\\%s\\%s" % (
                     "HKLM" if hive == winreg.HKEY_LOCAL_MACHINE else "HKCU", path, subname)
                 apps.append(InstalledApp(
                     name=name,
                     version=_reg_read_value(sk, "DisplayVersion"),
                     publisher=_reg_read_value(sk, "Publisher"),
-                    install_location=loc,
-                    uninstall_string=_reg_read_value(sk, "UninstallString"),
-                    main_exe=_clean_icon_path(exe),
-                    source="registry",
+                    install_location=_expand(loc),
+                    uninstall_string=uninstall,
+                    main_exe=_resolve_app_exe(name, loc, icon, uninstall),
+                    source=origin,
                     reg_keys=[full_key],
                 ))
             winreg.CloseKey(sk)
@@ -208,7 +343,7 @@ def analyze_app(app: InstalledApp) -> InstalledApp:
         app.risks.append("shell_extension")
         app.notes.append("Extensao de shell detectada: so funciona registrada no Explorer -> limitacao parcial.")
     # heuristicas de estrategia
-    if not app.risks and app.source == "registry" and app.size_bytes < 500 * 1024 * 1024:
+    if not app.risks and is_registry_source(app.source) and app.size_bytes < 500 * 1024 * 1024:
         app.strategy = "SANDBOX"
         app.notes.append("Standalone simples: recomendado SANDBOX completa (arquivos+registro virtualizados).")
     elif not app.risks:

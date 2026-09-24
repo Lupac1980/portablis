@@ -150,8 +150,8 @@ class App(tk.Tk):
         self.inc_reg = tk.BooleanVar(value=True)
         self.inc_file = tk.BooleanVar(value=True)
         for var, txt in ((self.inc_reg,
-                          "(a) Registro — HKLM/HKCU\\...\\CurrentVersion\\Uninstall "
-                          "(mesma fonte do Painel de Controle)"),
+                          "(a) Programas instalados — mesma lista do Painel de Controle > "
+                          "\"Desinstalar um programa\" (HKLM 64-bit + 32-bit/WOW64 + HKCU)"),
                          (self.inc_file,
                           "(b) Varredura de .exe em pastas comuns "
                           "(Program Files, Desktop, Downloads, C:\\Apps...)")):
@@ -282,8 +282,8 @@ class App(tk.Tk):
         if self._busy:
             return
         try:
-            initial = os.path.join(os.environ.get("ProgramFiles", ""),
-                                   "CyberLink")  # ex. Cool Edit Pro; cai p/ home se nao existir
+            initial = os.environ.get("ProgramFiles(x86)", "") or \
+                      os.environ.get("ProgramFiles", "")
             if not os.path.isdir(initial):
                 initial = os.path.expanduser("~")
             path = filedialog.askopenfilename(
@@ -387,7 +387,9 @@ class App(tk.Tk):
         self.apps = apps
         self.tree.delete(*self.tree.get_children())
         for i, a in enumerate(apps):
-            src = {"registry": "Registro", "manual": "Selecao manual"}.get(a.source, "Varredura .exe")
+            src = ("Selecao manual" if a.source == "manual"
+                   else a.source if str(a.source).lower().startswith("Registro")
+                   else "Varredura .exe")
             self.tree.insert("", "end", iid=str(i), values=(
                 a.name, a.version, a.publisher, src, a.strategy,
                 self._fmt_size(a.size_bytes)), tags=(a.strategy,))
@@ -409,8 +411,7 @@ class App(tk.Tk):
         txt = ["Programa....: %s %s" % (a.name, a.version),
                "Publicador..: %s" % (a.publisher or "-"),
                "Local.......: %s" % (a.install_location or a.main_exe),
-               "Origem......: %s" % {"registry": "Registro (Uninstall)",
-                                     "manual": "Selecionado manualmente"}.get(a.source, "Varredura de .exe"),
+               "Origem......: %s" % ("Selecionado manualmente" if a.source == "manual" else a.source),
                "Conteudo....: %d arquivos (%s)" % (a.files_found,
                                                    self._fmt_size(a.size_bytes)),
                "Estrategia recomendada: %s" % a.strategy,

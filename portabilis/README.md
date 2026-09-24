@@ -1,7 +1,7 @@
 # Portabilis 🧉
 
 Clone programas instalados no Windows e execute-os como **portáteis** — MVP focado
-no caso real do **Cool Edit Pro 2.1**, mas funciona para a maioria dos programas
+funciona para a maioria dos programas
 *standalone* (sem dependências profundas de sistema).
 
 ## O que o Portabilis faz
@@ -76,7 +76,7 @@ copiável para pen-drive.
 ## Uso
 
 1. Execute `Portabilis.exe` → aba **1 · Detectar** → *Escanear programas*.
-2. Selecione **Cool Edit Pro 2.1** (duplo clique vai para a aba 2).
+2. Selecione o programa desejado na lista (duplo clique vai para a aba 2). A lista é idêntica à do Painel de Controle > "Desinstalar um programa" (inclui apps de 32 bits via WOW6432Node), além da varredura opcional de .exe e da seleção manual do executável.
 3. Leia o diagnóstico; escolha SANDBOX ou LAUNCHER; habilite o reset de trial se desejar.
 4. Aba **3 · Clonar** → formato de saída → **CLONAR PROGRAMA**.
 5. Abra o pacote gerado e execute `PortabilisLauncher.exe`
@@ -86,8 +86,8 @@ copiável para pen-drive.
 
 ```bat
 python cli.py scan
-python cli.py analyze "Cool Edit Pro"
-python cli.py clone "Cool Edit Pro" --out D:\portatil --format PASTA ^
+python cli.py analyze "Nome do Programa"
+python cli.py clone "Nome do Programa" --out D:\portatil --format PASTA ^
        --strategy LAUNCHER --trial-reset --trial-mode generico
 ```
 

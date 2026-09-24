@@ -36,7 +36,7 @@ def cmd_scan(args):
     print("%-45s %-10s %-9s %s" % ("PROGRAMA", "ORIGEM", "ESTRATEGIA", "TAMANHO"))
     print("-" * 80)
     for a in apps:
-        src = "registro" if a.source == "registry" else "varredura"
+        src = "registro" if scan.is_registry_source(a.source) else ("manual" if a.source == "manual" else "varredura")
         print("%-45s %-10s %-9s %.1f MB" % (a.name[:44], src, a.strategy,
                                             a.size_bytes / 1e6))
     print("\n%d programa(s)." % len(apps))
