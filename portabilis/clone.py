@@ -13,6 +13,9 @@ Formatos de saida (item 9):
   (a) PASTA : pasta com todos os arquivos + PortabilisLauncher.exe
   (b) SFX   : unico .exe autoextrativo (gerado com iexpress, se disponivel)
   (c) ZIP   : pacote comprimido pronto para extrair e executar
+  (d) EXE   : unico .exe "onefile" no estilo build_exe.bat (PyInstaller);
+              ao executar, extrai o pacote para uma pasta ao lado do .exe
+              (ou %TEMP%) e lanca o PortabilisLauncher automaticamente.
 """
 import os
 import sys
@@ -489,6 +492,8 @@ def clone_program(app, output_dir: str, output_format: str = "PASTA",
     # 6) formato de saida (item 9)
     if output_format == "SFX":
         artifact = _make_sfx(pkg, Path(output_dir), safe_name, warnings)
+    elif output_format == "EXE":
+        artifact = _make_onefile_exe(pkg, Path(output_dir), safe_name, warnings)
     elif output_format == "ZIP":
         artifact = _make_zip(pkg, Path(output_dir), safe_name)
         shutil.rmtree(pkg, ignore_errors=True)
@@ -559,6 +564,164 @@ def _make_sfx(pkg: Path, out_dir: Path, name: str, warnings: List[str]) -> Path:
         sed.unlink(missing_ok=True)
     except OSError:
         pass
+    z = _make_zip(pkg, out_dir, name)
+    shutil.rmtree(pkg, ignore_errors=True)
+    return z
+
+
+ONEFILE_WRAPPER_SRC = r'''# -*- coding: utf-8 -*-
+"""Portabilis OneFile - extrai o pacote embutido e lanca o programa clonado.
+
+Compilado com PyInstaller --onefile (mesmo estilo do build_exe.bat do
+Portabilis). Ao executar:
+  1. Extrai os arquivos empacotados para "<nome-do-exe>.Data" ao lado do .exe
+     (se a pasta de destino permitir escrita; senao usa %TEMP%).
+  2. Executa PortabilisLauncher.exe de la (que prepara registro/AppData e roda
+     o programa clonado).
+Na segunda execucao em diante a extracao e pulada (usa a pasta existente),
+entao dados salvos pelo programa sao preservados entre execucoes - igual a um
+aplicativo portable de pendrive.
+"""
+import os
+import sys
+import subprocess
+
+APP_NAME = "@@NAME@@"
+
+def is_bundle():
+    return getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+
+def payload_root():
+    if is_bundle():
+        base = os.path.join(sys._MEIPASS, "payload")
+        if os.path.isdir(base):
+            return base
+    # modo desenvolvimento: payload ao lado deste script
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "payload")
+    if os.path.isdir(cand):
+        return cand
+    raise SystemExit("ERRO: pacote interno 'payload' nao encontrado.")
+
+def exe_dir():
+    if is_bundle():
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.path.dirname(os.path.abspath(__file__))
+
+def target_dir():
+    """Pasta destino da extracao: ao lado do .exe se gravavel, senao TEMP."""
+    dest = os.path.join(exe_dir(), APP_NAME + ".Data")
+    try:
+        os.makedirs(dest, exist_ok=True)
+        probe = os.path.join(dest, ".write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        return dest
+    except OSError:
+        tmp = os.path.join(os.environ.get("TEMP", "."), APP_NAME + ".Portable")
+        os.makedirs(tmp, exist_ok=True)
+        return tmp
+
+def extract(src_root, dst):
+    import shutil
+    marker = os.path.join(dst, ".extracted_ok")
+    stamp = os.path.join(dst, ".stamp")
+    src_stamp = os.path.join(src_root, ".stamp")
+    want = str(_payload_count(src_root))
+    try:
+        have = open(stamp).read().strip() if os.path.exists(stamp) else ""
+    except OSError:
+        have = ""
+    if os.path.exists(marker) and have == want:
+        return  # ja extraido anteriormente
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        rel = os.path.relpath(dirpath, src_root)
+        outdir = os.path.normpath(os.path.join(dst, rel))
+        os.makedirs(outdir, exist_ok=True)
+        for fn in filenames:
+            if fn == ".stamp":
+                continue
+            s = os.path.join(dirpath, fn)
+            d = os.path.join(outdir, fn)
+            if not os.path.exists(d) or os.path.getmtime(s) > os.path.getmtime(d):
+                shutil.copy2(s, d)
+    with open(stamp, "w") as f:
+        f.write(want)
+    with open(marker, "w") as f:
+        f.write("ok")
+
+def _payload_count(root):
+    n = 0
+    for _, _, files in os.walk(root):
+        n += len(files)
+    return n
+
+def main():
+    src = payload_root()
+    dst = target_dir()
+    print("Portabilis OneFile - %s" % APP_NAME)
+    print("Extraindo/atualizando pacote portavel em: %s" % dst)
+    extract(src, dst)
+    launcher = os.path.join(dst, "PortabilisLauncher.exe")
+    if os.path.exists(launcher):
+        subprocess.Popen([launcher], cwd=dst)
+        return 0
+    fallback_py = os.path.join(dst, "launcher_source.py")
+    if os.path.exists(fallback_py):
+        subprocess.Popen([sys.executable, fallback_py], cwd=dst)
+        return 0
+    print("ERRO: PortabilisLauncher.exe nao foi gerado (PyInstaller ausente na "
+          "clone?). Use o formato PASTA ou instale 'pip install pyinstaller'.")
+    return 1
+
+if __name__ == "__main__":
+    rc = main()
+    if is_bundle() and rc:
+        input("Pressione Enter para sair...")
+    sys.exit(rc)
+'''
+
+
+def _make_onefile_exe(pkg: Path, out_dir: Path, name: str,
+                      warnings: List[str]) -> Path:
+    """Unico .exe onefile (estilo build_exe.bat): empacota a pasta inteira do
+    clone dentro de um executavel que extrai e roda o launcher ao ser aberto."""
+    ext = ".exe" if IS_WIN else ""
+    exe_out = out_dir / ("%s.Portable%s" % (name, ext))
+    work = pkg / "_onefile_build"
+    work.mkdir(exist_ok=True)
+    payload = work / "payload"
+    # move o conteudo do pacote para dentro de payload/ (sem o diretorio raiz)
+    payload.mkdir(exist_ok=True)
+    for child in list(pkg.iterdir()):
+        if child != work:
+            shutil.move(str(child), str(payload / child.name))
+    # carimbo para detectar reextracao quando o conteudo mudar
+    (payload / ".stamp").write_text(str(sum(1 for _ in payload.rglob("*") if _.is_file())),
+                                    encoding="ascii")
+    wrapper = work / ("onefile_%d.py" % (abs(hash(name)) % 9999))
+    wrapper.write_text(ONEFILE_WRAPPER_SRC.replace("@@NAME@@", name),
+                           encoding="utf-8")
+    py = sys.executable
+    try:
+        r = run([py, "-m", "PyInstaller", "--onefile", "--console",
+                 "--name", "%s.Portable" % name,
+                 "--distpath", str(out_dir),
+                 "--workpath", str(work / "build"),
+                 "--specpath", str(work),
+                 "--add-data", "%s%spayload" % (payload, os.pathsep),
+                 "--noconfirm", str(wrapper)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
+        produced = out_dir / ("%s.Portable%s" % (name, ext))
+        if r.returncode == 0 and produced.exists():
+            shutil.rmtree(pkg, ignore_errors=True)
+            return produced
+    except Exception:
+        pass
+    warnings.append("PyInstaller indisponivel: nao foi possivel gerar o EXE "
+                    "onefile; fallback para ZIP.")
+    shutil.rmtree(work, ignore_errors=True)
     z = _make_zip(pkg, out_dir, name)
     shutil.rmtree(pkg, ignore_errors=True)
     return z
