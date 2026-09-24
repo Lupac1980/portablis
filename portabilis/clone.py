@@ -343,8 +343,9 @@ def build_report(app, strategy, output_format, trial_info, warnings, blocked) ->
     lines.append("=" * 60)
     lines.append("Programa.....: %s %s" % (app.name, app.version))
     lines.append("Publicador...: %s" % (app.publisher or "-"))
-    lines.append("Origem.......: %s" % ("Registro (Uninstall)"
-                                        if app.source == "registry" else "Varredura de .exe"))
+    lines.append("Origem.......: %s" % {"registry": "Registro (Uninstall)",
+                                        "manual": "Selecao manual"}.get(
+                                            app.source, "Varredura de .exe"))
     lines.append("Local........: %s" % (app.install_location or app.main_exe))
     lines.append("Tamanho......: %.1f MB em %d arquivos"
                  % (app.size_bytes / 1e6, app.files_found))

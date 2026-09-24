@@ -63,7 +63,13 @@ class App(tk.Tk):
         self._busy = False
         self._setup_styles()
         self._build()
-        self.after(300, lambda: self.do_scan())
+        # NAO escaneia automaticamente: o usuario inicia quando quiser
+        # (botao "Iniciar Escaneamento") ou seleciona diretamente um .exe.
+        self.tree.insert("", "end", iid="_hint", values=(
+            'Clique em "Iniciar Escaneamento" ou use "Selecionar .exe do programa..."',
+            "", "", "", "", ""))
+        self.tree.tag_configure("hint", foreground=MUTED)
+        self.tree.item("_hint", tags=("hint",))
 
     # ------------------------------------------------------------ estilos
     def _setup_styles(self):
@@ -135,6 +141,7 @@ class App(tk.Tk):
                  font=FONT_BOLD).pack(side="right")
 
         nb = ttk.Notebook(self)
+        self.nb = nb
         nb.pack(fill="both", expand=True, padx=14, pady=(6, 0))
 
         # ---- aba 1: deteccao ----------------------------------------
@@ -154,7 +161,16 @@ class App(tk.Tk):
                 .pack(fill="x", padx=14, pady=3)
             card.columnconfigure(0, weight=1)
         row = tk.Frame(card, bg=BG2); row.pack(fill="x", padx=14, pady=10)
-        self._btn(row, "Escanear programas", lambda: self.do_scan()).pack(side="left")
+        self._btn(row, "▶  Iniciar Escaneamento", lambda: self.do_scan())\
+            .pack(side="left")
+        self._btn(row, "Selecionar .exe do programa...",
+                  self.pick_exe_manually, accent=False)\
+            .pack(side="left", padx=10)
+        tk.Label(card, text="O escaneamento nao inicia sozinho: clique em "
+                            "\"Iniciar Escaneamento\" ou selecione diretamente "
+                            "o arquivo .exe do programa que deseja clonar.",
+                 bg=BG2, fg=MUTED, font=("Segoe UI", 9), wraplength=900,
+                 justify="left").pack(anchor="w", padx=14, pady=(0, 6))
         self.progress = ttk.Progressbar(card, mode="indeterminate",
                                         style="Horizontal.TProgressbar")
         self.progress.pack(fill="x", padx=14, pady=(0, 12))
@@ -259,6 +275,69 @@ class App(tk.Tk):
         if d:
             self.out_dir.set(d)
 
+    # ------------------------------------------- selecao manual de .exe
+    def pick_exe_manually(self):
+        """Abre dialogo para o usuario escolher diretamente o .exe do programa
+        a clonar (a pasta ao redor do exe sera tratada como instalacao)."""
+        if self._busy:
+            return
+        try:
+            initial = os.path.join(os.environ.get("ProgramFiles", ""),
+                                   "CyberLink")  # ex. Cool Edit Pro; cai p/ home se nao existir
+            if not os.path.isdir(initial):
+                initial = os.path.expanduser("~")
+            path = filedialog.askopenfilename(
+                title="Selecione o executavel (.exe) do programa a clonar",
+                initialdir=initial,
+                filetypes=[("Executaveis", "*.exe"), ("Todos os arquivos", "*.*")])
+        except Exception:
+            path = ""
+        if not path:
+            self._set_status("Nenhum arquivo selecionado", MUTED)
+            return
+        folder = os.path.dirname(path)
+        name = os.path.splitext(os.path.basename(path))[0]
+        app = scan.InstalledApp(
+            name=name,
+            install_location=folder,
+            main_exe=path,
+            source="manual",
+        )
+        try:
+            filenames = [f for f in os.listdir(folder)
+                         if os.path.isfile(os.path.join(folder, f))]
+            app.files_found = len(filenames)
+        except OSError:
+            pass
+
+        def work():
+            try:
+                analyzed = scan.analyze_app(app)
+                self.after(0, lambda: self._manual_done(analyzed))
+            except Exception:
+                err = traceback.format_exc()
+                self.after(0, lambda: self._log("ERRO ao analisar:\n" + err))
+                self.after(0, lambda: self._busy_guard(False))
+        self._busy_guard(True, "Analisando %s..." % name)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _manual_done(self, app):
+        # adiciona/replace na lista e na tabela, sem apagar resultados previos
+        self.apps.append(app)
+        idx = len(self.apps) - 1
+        src = "Selecionado manualmente"
+        self.tree.insert("", "end", iid=str(idx), values=(
+            app.name, app.version, app.publisher, src, app.strategy,
+            self._fmt_size(app.size_bytes)), tags=(app.strategy,))
+        self.tree.selection_set(str(idx))
+        self.tree.see(str(idx))
+        self._busy_guard(False)
+        self._set_status("Programa analisado: %s" % app.name, OK)
+        self._log("[manual] %s -> estrategia %s (pasta: %s)"
+                  % (app.name, app.strategy, app.install_location))
+        self.tab2.nametowidget(self.tab2.winfo_children()[0])  # noop guard
+        self.nb.select(self.tab2)
+
     def _log(self, msg):
         self.log.configure(state="normal")
         self.log.insert("end", msg + "\n")
@@ -308,7 +387,7 @@ class App(tk.Tk):
         self.apps = apps
         self.tree.delete(*self.tree.get_children())
         for i, a in enumerate(apps):
-            src = "Registro" if a.source == "registry" else "Varredura .exe"
+            src = {"registry": "Registro", "manual": "Selecao manual"}.get(a.source, "Varredura .exe")
             self.tree.insert("", "end", iid=str(i), values=(
                 a.name, a.version, a.publisher, src, a.strategy,
                 self._fmt_size(a.size_bytes)), tags=(a.strategy,))
@@ -321,7 +400,7 @@ class App(tk.Tk):
 
     def _on_select(self, _evt=None):
         sel = self.tree.selection()
-        if not sel:
+        if not sel or sel[0] == "_hint":
             return
         idx = int(sel[0])
         self.selected = self.apps[idx]
@@ -330,8 +409,8 @@ class App(tk.Tk):
         txt = ["Programa....: %s %s" % (a.name, a.version),
                "Publicador..: %s" % (a.publisher or "-"),
                "Local.......: %s" % (a.install_location or a.main_exe),
-               "Origem......: %s" % ("Registro (Uninstall)" if a.source == "registry"
-                                     else "Varredura de .exe"),
+               "Origem......: %s" % {"registry": "Registro (Uninstall)",
+                                     "manual": "Selecionado manualmente"}.get(a.source, "Varredura de .exe"),
                "Conteudo....: %d arquivos (%s)" % (a.files_found,
                                                    self._fmt_size(a.size_bytes)),
                "Estrategia recomendada: %s" % a.strategy,
