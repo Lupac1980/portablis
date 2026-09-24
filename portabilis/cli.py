@@ -5,7 +5,7 @@ Portabilis CLI - alternativa sem interface grafica (util para automacao/testes).
 Uso:
   python cli.py scan [--no-registry] [--no-filescan] [--json]
   python cli.py analyze "Nome do Programa"
-  python cli.py clone "Nome do Programa" --out DIR [--format PASTA|SFX|ZIP]
+  python cli.py clone "Nome do Programa" --out DIR [--format PASTA|SFX|ZIP|EXE]
                     [--strategy SANDBOX|LAUNCHER] [--trial-reset]
                     [--trial-mode generico|heuristica-avancada]
 """
@@ -63,7 +63,8 @@ def cmd_clone(args):
         art = clone.clone_program(
             app, args.out, args.format, args.strategy,
             args.trial_reset, args.trial_mode,
-            progress=lambda n, m: print("[%6d] %s" % (n, m)))
+            progress=lambda n, m: print("[%6d] %s" % (n, m)),
+            registry_mode=args.registry_mode)
         print("\nARTEFATO: %s" % art)
         return 0
     except clone.CloneError as e:
@@ -80,11 +81,14 @@ def main(argv=None):
     a = sub.add_parser("analyze"); a.add_argument("name")
     c = sub.add_parser("clone");   c.add_argument("name")
     c.add_argument("--out", required=True)
-    c.add_argument("--format", choices=["PASTA", "SFX", "ZIP"], default="PASTA")
+    c.add_argument("--format", choices=["PASTA", "SFX", "ZIP", "EXE"], default="PASTA")
     c.add_argument("--strategy", choices=["SANDBOX", "LAUNCHER"], default=None)
     c.add_argument("--trial-reset", action="store_true")
     c.add_argument("--trial-mode", choices=["generico", "heuristica-avancada"],
                    default="generico")
+    c.add_argument("--registry-mode", choices=["VIRTUAL", "REG"], default="VIRTUAL",
+                   help="VIRTUAL (padrao): registro isolado no pacote, simula 1a execucao. "
+                        "REG: importa .reg no registro real do Windows.")
     args = p.parse_args(argv)
     if args.cmd == "scan":
         return cmd_scan(args)

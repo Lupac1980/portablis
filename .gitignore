@@ -1,2 +1,6 @@
+# Compiled/Binary files
 __pycache__/
 *.pyc
+
+# Git bundles (binary artifacts)
+*.bundle

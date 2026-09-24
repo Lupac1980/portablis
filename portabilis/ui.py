@@ -229,6 +229,24 @@ class App(tk.Tk):
         tk.Label(g2, text="generico = zera contadores conhecidos (seguro) | "
                          "heuristica = padroes de trial mais agressivos",
                  bg=BG2, fg=MUTED, font=("Segoe UI", 9)).pack(side="left")
+        # ---- modo de registro: VIRTUAL (padrao) simula primeira execucao ----
+        g3 = tk.Frame(opts, bg=BG2); g3.pack(fill="x", padx=14, pady=6)
+        tk.Label(g3, text="Registro:", bg=BG2, fg=FG, font=FONT).pack(side="left")
+        self.registry_mode_var = tk.StringVar(value="VIRTUAL")
+        for v, lbl in (("VIRTUAL", "Virtual (isolado no pacote - 'primeira execucao')"),
+                       ("REG",   "Real (importa .reg no Windows na 1a execucao)")):
+            tk.Radiobutton(g3, text=lbl, value=v, variable=self.registry_mode_var,
+                           bg=BG2, fg=FG, selectcolor=BG3, activebackground=BG2,
+                           activeforeground=FG, font=FONT).pack(side="left", padx=8)
+        tk.Label(
+            opts,
+            text="Modo VIRTUAL (recomendado): o launcher NAO altera o registro real; "
+                 "as chaves vivem em Data\\RegistryVirtual e os contadores/trials sao "
+                 "reiniciados dentro do pacote, simulando execucao pela primeira vez. "
+                 "Obs.: programas que leem o registro via API Win32 ainda verao o "
+                 "registro real - para esses, use modo REG ou virtualizador dedicado.",
+            bg=BG2, fg=MUTED, font=("Segoe UI", 9), wraplength=900, justify="left")\
+            .pack(anchor="w", padx=14, pady=(0, 4))
         note = tk.Label(
             opts,
             text="Atencao: use apenas em software que voce possui/licenciou. O reset "
@@ -243,9 +261,11 @@ class App(tk.Tk):
         out = Card(tab3, "Formato de saida (item 9)")
         self.fmt_var = tk.StringVar(value="PASTA")
         for v, lbl in (("PASTA", "(a) Pasta com arquivos + PortabilisLauncher.exe"),
-                       ("SFX",   "(b) Arnico .exe autoextrativo (SFX)"),
-                       ("ZIP",   "(c) Pacote comprimido para extrair e executar")):
-            tk.Radiobutton(out, text=lbl.replace("Arnico", "Unico"), value=v,
+                       ("SFX",   "(b) Unico .exe autoextrativo (SFX)"),
+                       ("ZIP",   "(c) Pacote comprimido para extrair e executar"),
+                       ("EXE",   "(d) Unico .exe portable estilo build_exe.bat "
+                                 "(extrai ao lado do exe e executa; ideal p/ pendrive)")):
+            tk.Radiobutton(out, text=lbl, value=v,
                            variable=self.fmt_var, bg=BG2, fg=FG, selectcolor=BG3,
                            activebackground=BG2, activeforeground=FG,
                            font=FONT, anchor="w").pack(fill="x", padx=14, pady=3)
@@ -440,6 +460,8 @@ class App(tk.Tk):
         strategy = self.strategy_var.get()
         trial = self.trial_on.get()
         mode = self.trial_mode.get()
+        regmode = getattr(self, "registry_mode_var", None)
+        regmode = regmode.get() if regmode else "VIRTUAL"
         out = self.out_dir.get()
         if strategy == "MANUAL":
             self.show_report()
@@ -455,7 +477,8 @@ class App(tk.Tk):
 
         def work():
             try:
-                art = clone.clone_program(app, out, fmt, strategy, trial, mode, prog)
+                art = clone.clone_program(app, out, fmt, strategy, trial, mode,
+                                          prog, registry_mode=regmode)
                 self.after(0, lambda: self._clone_done(str(art)))
             except clone.CloneError as e:
                 self.after(0, lambda: self._log("BLOQUEADO: %s" % e))

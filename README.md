@@ -10,10 +10,11 @@ Clone programas instalados no Windows em versões **portáteis** — sem instala
 - **Análise de viabilidade**: antes de clonar, o Portabilis gera um relatório apontando dependências críticas (serviços, drivers, DLLs em System32, complementos shell) e recomenda a melhor estratégia: `SANDBOX`, `LAUNCHER` ou `MANUAL`.
 - **Clonagem pragmática**: copia os arquivos do programa, exporta as chaves de registro relevantes para `.reg` e embute um **launcher** que prepara o contexto (registro local, AppData/ProgramData redirecionados, ponte de DLLs via `PATH`) e executa o programa.
 - **Reset de contadores de trial** (opcional): varredura genérica de chaves/valores conhecidos + modo heurístico avançado para detectar padrões de licença/timestamp.
-- **3 formatos de saída**:
+- **4 formatos de saída**:
   - **(a) PASTA** — pasta com todos os arquivos + `Launch_<App>.exe/.bat`;
   - **(b) SFX** — único `.exe` autoextraível (gerado com IExpress nativo do Windows);
-  - **(c) ZIP** — pacote comprimido pronto para extrair e usar.
+  - **(c) ZIP** — pacote comprimido pronto para extrair e usar;
+  - **(d) EXE** — único `.exe` portable no estilo `build_exe.bat` (PyInstaller onefile): copie para o pendrive, execute em qualquer PC sem instalar nada; ele extrai o pacote para `<App>.Data` ao lado do `.exe` (ou `%TEMP%` se a pasta for somente leitura) e abre o programa. Na 2ª execução a extração é pulada e seus dados são preservados.
 - **Interface gráfica moderna** (dark theme, tkinter) e **CLI** para automação.
 
 ## Como gerar o `Portabilis.exe` portable

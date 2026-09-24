@@ -32,6 +32,9 @@ funciona para a maioria dos programas
 1. **(a) PASTA** – pasta com tudo + `PortabilisLauncher.exe`
 2. **(b) SFX** – único `.exe` autoextrativo (via `iexpress` nativo; fallback ZIP)
 3. **(c) ZIP** – pacote comprimido para extrair e executar
+4. **(d) EXE** – único `.exe` portable estilo `build_exe.bat` (PyInstaller onefile):
+   extrai o pacote para `<App>.Data` ao lado do `.exe` (ou `%TEMP%`) e executa o
+   launcher; ideal para pendrive. Requer PyInstaller (`pip install pyinstaller`).
 
 ## Estrutura do código
 
