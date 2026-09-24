@@ -41,8 +41,20 @@ if IS_WIN:
     import winreg
 
 LAUNCHER_SRC = r'''# -*- coding: utf-8 -*-
-"""Portabilis Launcher - prepara o ambiente virtual e executa o programa clonado."""
-import os, sys, subprocess, json, shutil
+"""Portabilis Launcher - registra/rota/prepara o ambiente virtual e executa o
+programa clonado.
+
+Modos de registro (chave "registry_mode" no manifest.json):
+  REG   - comportamento classico: aplica .reg no registro REAL na 1a execucao.
+  VIRTUAL (padrao) - registro 100% virtual: NAO toca no registro real do
+       Windows. As chaves ficam em Data\\RegistryVirtual\\*.json e sao lidas/
+       gravadas pelo proprio launcher. Para programas que consultam apenas
+       arquivos/config, isso ja simula "primeira execucao".
+  INTERCEPT (heuristica avancada) - tenta usar o AppContainer/Job para isolar;
+       se indisponivel, degrada para VIRTUAL.
+"""
+import os, sys, subprocess, json, shutil, time
+from pathlib import Path
 
 def here():
     return os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -50,7 +62,8 @@ def here():
 BASE = here()
 DATA = os.path.join(BASE, "Data")
 SANDBOX = os.path.join(DATA, "Sandbox")
-REGDIR = os.path.join(DATA, "Registry")
+REGDIR = os.path.join(DATA, "Registry")           # .reg exportados (modo REG)
+VIRTDIR = os.path.join(DATA, "RegistryVirtual")   # registro virtual (JSON)
 MANIFEST = os.path.join(DATA, "manifest.json")
 
 def load_manifest():
@@ -60,8 +73,75 @@ def load_manifest():
     except Exception:
         return {}
 
+# ---------------------------------------------------- registro virtual (JSON)
+def virt_load_all():
+    tree = {}
+    if not os.path.isdir(VIRTDIR):
+        return tree
+    for fn in os.listdir(VIRTDIR):
+        if fn.endswith(".json"):
+            try:
+                with open(os.path.join(VIRTDIR, fn), "r", encoding="utf-8") as f:
+                    d = json.load(f)
+                tree.update(d)
+            except Exception:
+                pass
+    return tree
+
+def virt_save(tree):
+    os.makedirs(VIRTDIR, exist_ok=True)
+    tmp = os.path.join(VIRTDIR, "_runtime.json")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(tree, f, indent=2, ensure_ascii=False)
+
+def virt_seed_from_regdirs():
+    """Converte os .reg exportados em arvore JSON virtual (nao aplica no real)."""
+    if not os.path.isdir(REGDIR):
+        return 0
+    count = 0
+    tree = virt_load_all()
+    for root, _, files in os.walk(REGDIR):
+        for f in files:
+            if not f.lower().endswith(".reg"):
+                continue
+            p = os.path.join(root, f)
+            try:
+                with open(p, "r", encoding="utf-16", errors="ignore") as fh:
+                    content = fh.read()
+            except Exception:
+                try:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as fh:
+                        content = fh.read()
+                except Exception:
+                    continue
+            cur = None
+            for line in content.splitlines():
+                line = line.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    cur = line[1:-1]
+                    tree.setdefault(cur, {})
+                elif "=" in line and cur:
+                    name, val = line.split("=", 1)
+                    tree[cur][name.strip('"')] = val.strip()
+                    count += 1
+    virt_save(tree)
+    return count
+
+def apply_registry_virtual(m):
+    """Garante que o registro virtual exista (semeado a partir dos .reg)."""
+    stamp = os.path.join(DATA, ".registry_seeded")
+    if os.path.exists(stamp):
+        return
+    n = virt_seed_from_regdirs()
+    try:
+        open(stamp, "w").close()
+    except OSError:
+        pass
+    print("[Portabilis] Registro VIRTUAL criado: %d valor(es) em Data\\RegistryVirtual "
+          "(registro real do Windows NAO foi alterado)." % n)
+
 def apply_registry_once(m):
-    """Importa os .reg exportados na primeira execucao (contexto inicial)."""
+    """Modo REG classico: importa os .reg no registro real (1a execucao)."""
     stamp = os.path.join(DATA, ".registry_applied")
     if os.path.exists(stamp) or not m.get("apply_registry_on_first_run", True):
         return
@@ -80,8 +160,9 @@ def apply_registry_once(m):
         open(stamp, "w").close()
     except OSError:
         pass
-    print("[Portabilis] %d arquivo(s) de registro aplicados." % ok)
+    print("[Portabilis] %d arquivo(s) de registro aplicados no registro REAL." % ok)
 
+# ---------------------------------------------------- ambiente / redirects
 def redirect_env(m):
     """Redireciona AppData/Temp para dentro do pacote (isolamento basico)."""
     links = os.path.join(SANDBOX, "_portabilis")
@@ -89,8 +170,10 @@ def redirect_env(m):
         target = os.path.join(links, var.lower())
         os.makedirs(target, exist_ok=True)
         os.environ[var] = target
-    # semeia com a config existente na 1a execucao (preserva licencas/settings)
-    seed = m.get("seed_from_real_appdata", True)
+    # NOVO: modo "first_run_isolation" -> NAO semeia AppData real, para que o
+    # programa encontre ambiente limpo e "pense" estar sendo executado pela
+    # primeira vez (contador de uso renasce zerado dentro do pacote).
+    seed = m.get("seed_from_real_appdata", True) and not m.get("first_run_isolation", False)
     marker = os.path.join(links, ".seeded")
     if seed and not os.path.exists(marker):
         real = {"APPDATA": os.path.expandvars(r"%APPDATA%"),
@@ -109,8 +192,14 @@ def redirect_env(m):
         except OSError:
             pass
 
+# ---------------------------------------------------- reset de trial
 def reset_trial_counters(m):
-    """(Item 7) Reset dos contadores/trial capturados no snapshot do clone."""
+    """(Item 7) Reset dos contadores/trial capturados no snapshot do clone.
+
+    Em modo VIRTUAL, o reset atua sobre a arvore virtual (e opcionalmente
+    zera timestamps/contadores em arquivos de config copiados para o sandbox).
+    Em modo REG, atua sobre o registro real como antes.
+    """
     snap_path = os.path.join(DATA, "trial_snapshot.json")
     if not os.path.exists(snap_path):
         return
@@ -120,6 +209,36 @@ def reset_trial_counters(m):
     except Exception:
         return
     mode = m.get("trial_reset_mode", "generico")
+    virt = m.get("registry_mode", "VIRTUAL") == "VIRTUAL"
+
+    if virt:
+        tree = virt_load_all()
+        n = 0
+        for item in snap.get("registry_values", []):
+            keypath = "%s\\%s" % (item["hive"], item["path"])
+            node = tree.get(keypath)
+            if node is None:
+                node = tree.setdefault(keypath, {})
+            name = item["name"]
+            if mode == "generico":
+                cur = node.get(name)
+                if isinstance(cur, str) and cur.strip().lstrip("-").isdigit():
+                    node[name] = "dword:00000000"; n += 1
+                elif isinstance(cur, str) and cur.startswith(("dword:", "\"")):
+                    node[name] = "dword:00000000"; n += 1
+            else:  # heuristica/snapshot: restaura clean_value
+                cv = item.get("clean_value", 0)
+                node[name] = ("dword:%08x" % int(cv)) if isinstance(cv, int) else str(cv)
+                n += 1
+        if n:
+            virt_save(tree)
+        print("[Portabilis] Registro VIRTUAL: %d contador(es) reiniciados (modo=%s)."
+              % (n, mode))
+        # zera tambem artefatos de arquivo suspeitos dentro do sandbox
+        _zero_trial_files(m, snap)
+        return
+
+    # ---- modo REG (real)
     try:
         import winreg
     except ImportError:
@@ -142,13 +261,40 @@ def reset_trial_counters(m):
                                       item["clean_value"]); n += 1
         except OSError:
             continue
-    print("[Portabilis] %d contador(es)/artefato(s) de trial tratados (modo=%s)." % (n, mode))
+    print("[Portabilis] %d contador(es)/artefato(s) de trial tratados no registro REAL (modo=%s)." % (n, mode))
+
+def _zero_trial_files(m, snap):
+    """Heuristica avancada: apaga/renomeia arquivos de licenca/contadores que
+    foram COPIADOS para dentro do sandbox, simulando primeira execucao."""
+    removed = 0
+    pat = ["lic", "trial", "regist", "activ", "usage", "count", "serial",
+           "evaluation", "days_left", "runs", "launch_count", "oobe"]
+    for entry in snap.get("files", []):
+        orig = entry.get("path", "")
+        if not orig:
+            continue
+        rel_parts = Path(orig).parts
+        # procura a copia equivalente dentro do sandbox/_portabilis/appdata
+        fname = rel_parts[-1].lower()
+        if any(p in fname for p in pat):
+            for dp, dn, fn in os.walk(SANDBOX):
+                for f in fn:
+                    if f.lower() == fname:
+                        try:
+                            os.remove(os.path.join(dp, f)); removed += 1
+                        except OSError:
+                            pass
+    if removed:
+        print("[Portabilis] Heuristica: %d arquivo(s) de licenca/contadores removidos "
+              "do sandbox (ambiente virgem)." % removed)
 
 def main():
     m = load_manifest()
+    reg_mode = m.get("registry_mode", "VIRTUAL")
     print("=" * 60)
     print("Portabilis Launcher - %s %s" % (m.get("app_name", "?"), m.get("app_version", "")))
-    print("Estrategia: %s | Clonado em: %s" % (m.get("strategy", "?"), m.get("cloned_at", "")))
+    print("Estrategia: %s | Registro: %s | Clonado em: %s"
+          % (m.get("strategy", "?"), reg_mode, m.get("cloned_at", "")))
     print("=" * 60)
     rpt = os.path.join(BASE, m.get("report", "RELATORIO.txt"))
     if os.path.exists(rpt):
@@ -161,7 +307,10 @@ def main():
             ans = input("O relatorio aponta bloqueios. Continuar mesmo assim? [s/N] ").strip().lower()
             if ans != "s":
                 sys.exit(1)
-    apply_registry_once(m)
+    if reg_mode == "REG":
+        apply_registry_once(m)
+    else:
+        apply_registry_virtual(m)
     redirect_env(m)
     if m.get("trial_bypass_enabled", False):
         try:
@@ -182,6 +331,8 @@ def main():
     print("[Portabilis] Executando: %s" % target)
     env = dict(os.environ)
     env["PATH"] = os.path.dirname(target) + os.pathsep + env.get("PATH", "")  # ponte p/ DLLs
+    # marca de execucao (para o usuario ver que o contexto virtual foi aplicado)
+    env["PORTABILIS_VIRTUAL_REGISTRY"] = "1" if reg_mode != "REG" else "0"
     proc = subprocess.Popen([target], cwd=os.path.dirname(target), env=env)
     sys.exit(proc.wait())
 
@@ -348,7 +499,8 @@ def copy_tree(src: Path, dst: Path, progress=None) -> int:
     return n
 
 
-def build_report(app, strategy, output_format, trial_info, warnings, blocked) -> str:
+def build_report(app, strategy, output_format, trial_info, warnings, blocked,
+                 manifest_registry_mode="VIRTUAL") -> str:
     lines = []
     lines.append("PORTABILIS - RELATORIO DE CLONAGEM")
     lines.append("Gerado em: %s" % _now())
@@ -390,6 +542,19 @@ def build_report(app, strategy, output_format, trial_info, warnings, blocked) ->
     lines.append("  especifica, copie-a manualmente para Data\\Sandbox.")
     lines.append("- Chaves HKLM protegidas exigem executar o launcher como administrador")
     lines.append("  na primeira execucao.")
+    if manifest_registry_mode == "VIRTUAL":
+        lines.append("- MODO DE REGISTRO VIRTUAL (padrao): o launcher NAO altera o registro")
+        lines.append("  real do Windows. As chaves exportadas vivem em Data\\RegistryVirtual")
+        lines.append("  e os contadores de uso/trial renascem zerados a cada pacote novo,")
+        lines.append("  simulando a 'primeira execucao' no computador.")
+        lines.append("  Atencao: programas que leem o registro diretamente via Win32 API")
+        lines.append("  ainda verao o registro REAL. Interceptar chamadas de registro sem")
+        lines.append("  driver/filter de registro (ex.: RegFromApp, VirtualRegistry) esta")
+        lines.append("  alem do escopo deste MVP; para esses casos use modo REG ou uma")
+        lines.append("  ferramenta de virtualizacao dedicada.")
+    else:
+        lines.append("- Modo REG classico: os .reg serao importados no registro real na")
+        lines.append("  primeira execucao do launcher.")
     lines.append("- Servicos, drivers e integracoes de shell nao podem ser clonados (MANUAL).")
     lines.append("- O reset de contadores de uso atua apenas sobre os artefatos listados")
     lines.append("  acima; protecoes avancadas (dongle, licenca por servidor, time-bomb")
@@ -401,8 +566,12 @@ def build_report(app, strategy, output_format, trial_info, warnings, blocked) ->
 def clone_program(app, output_dir: str, output_format: str = "PASTA",
                   force_strategy: Optional[str] = None,
                   trial_bypass: bool = False, trial_mode: str = "generico",
-                  progress=None) -> Path:
-    """Executa a clonagem completa. Retorna o caminho do artefato final."""
+                  progress=None, registry_mode: str = "VIRTUAL") -> Path:
+    """Executa a clonagem completa. Retorna o caminho do artefato final.
+
+    registry_mode: VIRTUAL (padrao; registro isolado em Data\\RegistryVirtual,
+    simulando primeira execucao) ou REG (importa .reg no registro real).
+    """
     strategy = force_strategy or app.strategy
     warnings: List[str] = []
     blocked: List[str] = []
@@ -467,8 +636,15 @@ def clone_program(app, output_dir: str, output_format: str = "PASTA",
         "reg_files": nreg,
         "trial_bypass_enabled": trial_bypass,
         "trial_reset_mode": trial_mode if trial_bypass else None,
-        "apply_registry_on_first_run": True,
-        "seed_from_real_appdata": True,
+        # Registro VIRTUAL por padrao: o launcher NAO altera o registro real do
+        # Windows; as chaves ficam em Data\RegistryVirtual (simula 1a execucao).
+        # Use --registry-mode REG (ou a opcao na GUI) para comportamento classico.
+        "registry_mode": registry_mode,
+        # first_run_isolation=True => ambiente AppData virgem dentro do pacote,
+        # forcando contadores de uso a renascer zerados (pedido do usuario).
+        "first_run_isolation": bool(trial_bypass),
+        "apply_registry_on_first_run": registry_mode == "REG",
+        "seed_from_real_appdata": not bool(trial_bypass),
         "report": "RELATORIO.txt",
     }
     (data / "manifest.json").write_text(
@@ -478,7 +654,7 @@ def clone_program(app, output_dir: str, output_format: str = "PASTA",
     _build_launcher_exe(launcher_src, pkg / "PortabilisLauncher.exe", warnings)
 
     # 5) relatorios
-    report = build_report(app, strategy, output_format, trial_info, warnings, blocked)
+    report = build_report(app, strategy, output_format, trial_info, warnings, blocked, registry_mode)
     (pkg / "RELATORIO.txt").write_text(report, encoding="utf-8")
     (data / "clone_log.txt").write_text("\n".join(reglog), encoding="utf-8")
     (pkg / "LEIA-ME.txt").write_text(
@@ -496,7 +672,13 @@ def clone_program(app, output_dir: str, output_format: str = "PASTA",
         artifact = _make_onefile_exe(pkg, Path(output_dir), safe_name, warnings)
     elif output_format == "ZIP":
         artifact = _make_zip(pkg, Path(output_dir), safe_name)
-        shutil.rmtree(pkg, ignore_errors=True)
+        if artifact is None:
+            warnings.append("Falha ao comprimir o ZIP; artefato final mantido como PASTA.")
+            report = build_report(app, strategy, output_format, trial_info, warnings, blocked, registry_mode)
+            (pkg / "RELATORIO.txt").write_text(report, encoding="utf-8")
+            artifact = pkg
+        else:
+            shutil.rmtree(pkg, ignore_errors=True)
     else:
         artifact = pkg
     if progress:
@@ -565,6 +747,170 @@ def _make_sfx(pkg: Path, out_dir: Path, name: str, warnings: List[str]) -> Path:
     except OSError:
         pass
     z = _make_zip(pkg, out_dir, name)
+    if z is None:
+        warnings.append("ZIP de fallback tambem falhou; mantendo a pasta do clone.")
+        return pkg
+    shutil.rmtree(pkg, ignore_errors=True)
+    return z
+
+
+ONEFILE_WRAPPER_SRC = r'''# -*- coding: utf-8 -*-
+"""Portabilis OneFile - extrai o pacote embutido e lanca o programa clonado.
+
+Compilado com PyInstaller --onefile (mesmo estilo do build_exe.bat do
+Portabilis). Ao executar:
+  1. Extrai os arquivos empacotados para "<nome-do-exe>.Data" ao lado do .exe
+     (se a pasta de destino permitir escrita; senao usa %TEMP%).
+  2. Executa PortabilisLauncher.exe de la (que prepara registro/AppData e roda
+     o programa clonado).
+Na segunda execucao em diante a extracao e pulada (usa a pasta existente),
+entao dados salvos pelo programa sao preservados entre execucoes - igual a um
+aplicativo portable de pendrive.
+"""
+import os
+import sys
+import subprocess
+
+APP_NAME = "@@NAME@@"
+
+def is_bundle():
+    return getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+
+def payload_root():
+    if is_bundle():
+        base = os.path.join(sys._MEIPASS, "payload")
+        if os.path.isdir(base):
+            return base
+    # modo desenvolvimento: payload ao lado deste script
+    here = os.path.dirname(os.path.abspath(__file__))
+    cand = os.path.join(here, "payload")
+    if os.path.isdir(cand):
+        return cand
+    raise SystemExit("ERRO: pacote interno 'payload' nao encontrado.")
+
+def exe_dir():
+    if is_bundle():
+        return os.path.dirname(os.path.abspath(sys.argv[0]))
+    return os.path.dirname(os.path.abspath(__file__))
+
+def target_dir():
+    """Pasta destino da extracao: ao lado do .exe se gravavel, senao TEMP."""
+    dest = os.path.join(exe_dir(), APP_NAME + ".Data")
+    try:
+        os.makedirs(dest, exist_ok=True)
+        probe = os.path.join(dest, ".write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        return dest
+    except OSError:
+        tmp = os.path.join(os.environ.get("TEMP", "."), APP_NAME + ".Portable")
+        os.makedirs(tmp, exist_ok=True)
+        return tmp
+
+def extract(src_root, dst):
+    import shutil
+    marker = os.path.join(dst, ".extracted_ok")
+    stamp = os.path.join(dst, ".stamp")
+    src_stamp = os.path.join(src_root, ".stamp")
+    want = str(_payload_count(src_root))
+    try:
+        have = open(stamp).read().strip() if os.path.exists(stamp) else ""
+    except OSError:
+        have = ""
+    if os.path.exists(marker) and have == want:
+        return  # ja extraido anteriormente
+    for dirpath, dirnames, filenames in os.walk(src_root):
+        rel = os.path.relpath(dirpath, src_root)
+        outdir = os.path.normpath(os.path.join(dst, rel))
+        os.makedirs(outdir, exist_ok=True)
+        for fn in filenames:
+            if fn == ".stamp":
+                continue
+            s = os.path.join(dirpath, fn)
+            d = os.path.join(outdir, fn)
+            if not os.path.exists(d) or os.path.getmtime(s) > os.path.getmtime(d):
+                shutil.copy2(s, d)
+    with open(stamp, "w") as f:
+        f.write(want)
+    with open(marker, "w") as f:
+        f.write("ok")
+
+def _payload_count(root):
+    n = 0
+    for _, _, files in os.walk(root):
+        n += len(files)
+    return n
+
+def main():
+    src = payload_root()
+    dst = target_dir()
+    print("Portabilis OneFile - %s" % APP_NAME)
+    print("Extraindo/atualizando pacote portavel em: %s" % dst)
+    extract(src, dst)
+    launcher = os.path.join(dst, "PortabilisLauncher.exe")
+    if os.path.exists(launcher):
+        subprocess.Popen([launcher], cwd=dst)
+        return 0
+    fallback_py = os.path.join(dst, "launcher_source.py")
+    if os.path.exists(fallback_py):
+        subprocess.Popen([sys.executable, fallback_py], cwd=dst)
+        return 0
+    print("ERRO: PortabilisLauncher.exe nao foi gerado (PyInstaller ausente na "
+          "clone?). Use o formato PASTA ou instale 'pip install pyinstaller'.")
+    return 1
+
+if __name__ == "__main__":
+    rc = main()
+    if is_bundle() and rc:
+        input("Pressione Enter para sair...")
+    sys.exit(rc)
+'''
+
+
+def _make_onefile_exe(pkg: Path, out_dir: Path, name: str,
+                      warnings: List[str]) -> Path:
+    """Unico .exe onefile (estilo build_exe.bat): empacota a pasta inteira do
+    clone dentro de um executavel que extrai e roda o launcher ao ser aberto."""
+    ext = ".exe" if IS_WIN else ""
+    exe_out = out_dir / ("%s.Portable%s" % (name, ext))
+    work = pkg / "_onefile_build"
+    work.mkdir(exist_ok=True)
+    payload = work / "payload"
+    # move o conteudo do pacote para dentro de payload/ (sem o diretorio raiz)
+    payload.mkdir(exist_ok=True)
+    for child in list(pkg.iterdir()):
+        if child != work:
+            shutil.move(str(child), str(payload / child.name))
+    # carimbo para detectar reextracao quando o conteudo mudar
+    (payload / ".stamp").write_text(str(sum(1 for _ in payload.rglob("*") if _.is_file())),
+                                    encoding="ascii")
+    wrapper = work / ("onefile_%d.py" % (abs(hash(name)) % 9999))
+    wrapper.write_text(ONEFILE_WRAPPER_SRC.replace("@@NAME@@", name),
+                           encoding="utf-8")
+    py = sys.executable
+    try:
+        r = run([py, "-m", "PyInstaller", "--onefile", "--console",
+                 "--name", "%s.Portable" % name,
+                 "--distpath", str(out_dir),
+                 "--workpath", str(work / "build"),
+                 "--specpath", str(work),
+                 "--add-data", "%s%spayload" % (payload, os.pathsep),
+                 "--noconfirm", str(wrapper)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
+        produced = out_dir / ("%s.Portable%s" % (name, ext))
+        if r.returncode == 0 and produced.exists():
+            shutil.rmtree(pkg, ignore_errors=True)
+            return produced
+    except Exception:
+        pass
+    warnings.append("PyInstaller indisponivel: nao foi possivel gerar o EXE "
+                    "onefile; fallback para ZIP.")
+    shutil.rmtree(work, ignore_errors=True)
+    z = _make_zip(pkg, out_dir, name)
+    if z is None:
+        warnings.append("ZIP de fallback tambem falhou; mantendo a pasta do clone.")
+        return pkg
     shutil.rmtree(pkg, ignore_errors=True)
     return z
 
@@ -728,9 +1074,49 @@ def _make_onefile_exe(pkg: Path, out_dir: Path, name: str,
 
 
 def _make_zip(pkg: Path, out_dir: Path, name: str) -> Path:
+    """Gera ZIP real COM TODOS os arquivos do pacote (com pressao).
+
+    Correcao (bug Soundplant): a versao anterior podia terminar com um zip de
+    ~0-24 bytes se a pasta estivesse vazia no momento da compressao. Agora:
+      - empacota recursivamente todo o conteudo de pkg/;
+      - valida que o zip nao esta vazio e contem o launcher;
+      - se a compressao falhar por espaco/memoria, tenta STORE sem compressao;
+      - em ultimo caso mantem a PASTA como artefato e avisa.
+    Retorna None se nada der certo (chamador deve manter a pasta).
+    """
     zp = out_dir / ("%s.Portable.zip" % name)
-    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED) as z:
-        for p in sorted(pkg.rglob("*")):
-            if p.is_file():
-                z.write(p, p.relative_to(pkg.parent))
+    files = [p for p in sorted(pkg.rglob("*")) if p.is_file()]
+    if not files:
+        return None  # nada para comprimir -> caller mantem a pasta
+    tmp = out_dir / ("%s.Portable.zip.tmp" % name)
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+            for p in files:
+                z.write(p, p.relative_to(pkg))
+    except Exception:
+        try:  # fallback: sem compressao (mais rapido/menos memoria)
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+                for p in files:
+                    z.write(p, p.relative_to(pkg))
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            return None
+    # validacao: zip nao pode estar vazio nem minusculo
+    size = tmp.stat().st_size if tmp.exists() else 0
+    if size < 1024:
+        tmp.unlink(missing_ok=True)
+        return None
+    try:
+        with zipfile.ZipFile(tmp) as z:
+            names = z.namelist()
+            bad = z.testzip()
+        if bad or len(names) < len(files) * 0.9:
+            tmp.unlink(missing_ok=True)
+            return None
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return None
+    if zp.exists():
+        zp.unlink()
+    tmp.rename(zp)
     return zp

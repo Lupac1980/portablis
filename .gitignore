@@ -1,6 +1,6 @@
-# Python bytecode and cache
+# Compiled/Binary files
 __pycache__/
 *.pyc
 
-# Git bundles
+# Git bundles (binary artifacts)
 *.bundle

@@ -63,7 +63,8 @@ def cmd_clone(args):
         art = clone.clone_program(
             app, args.out, args.format, args.strategy,
             args.trial_reset, args.trial_mode,
-            progress=lambda n, m: print("[%6d] %s" % (n, m)))
+            progress=lambda n, m: print("[%6d] %s" % (n, m)),
+            registry_mode=args.registry_mode)
         print("\nARTEFATO: %s" % art)
         return 0
     except clone.CloneError as e:
@@ -85,6 +86,9 @@ def main(argv=None):
     c.add_argument("--trial-reset", action="store_true")
     c.add_argument("--trial-mode", choices=["generico", "heuristica-avancada"],
                    default="generico")
+    c.add_argument("--registry-mode", choices=["VIRTUAL", "REG"], default="VIRTUAL",
+                   help="VIRTUAL (padrao): registro isolado no pacote, simula 1a execucao. "
+                        "REG: importa .reg no registro real do Windows.")
     args = p.parse_args(argv)
     if args.cmd == "scan":
         return cmd_scan(args)

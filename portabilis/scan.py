@@ -87,6 +87,15 @@ TRIAL_LOCATIONS = [
 TRIAL_KEYWORDS = ["trial", "licen", "regist", "activ", "count", "usage", "expire",
                   "serial", "evaluation", "days_left", "runs", "launch_count", "oobe"]
 
+# Substantivos genericos que aparecem em MUITAS chaves do Windows e NAO indicam
+# licenca/trial do app alvo (ex.: "ActiveMovie", "RegisteredApplications",
+# "Classes\ActivatableClasses"). Usados apenas como filtro de exclusao quando o
+# match veio da palavra generica e nao do nome do proprio aplicativo.
+GENERIC_NOISE_WORDS = [
+    "active", "register", "registered", "registration-free", "classes",
+    "accounts", "account", "subscriptions", "usage", "activation",
+]
+
 
 @dataclass
 class InstalledApp:
@@ -360,20 +369,49 @@ def analyze_app(app: InstalledApp) -> InstalledApp:
 
 
 def scan_trial_artifacts(app: InstalledApp) -> List[str]:
-    """Varredura generica por chaves/arquivos conhecidos de trial/licenca."""
+    """Varredura generica por chaves/arquivos de trial/licenca DO PROPRIO APP.
+
+    Correcao (bug Soundplant): antes a varredura casava QUALQUER chave do
+    Windows que contivesse palavras genericas como "active"/"register"/"usage",
+    produzindo ~169 falsos positivos (ActiveMovie, RegisteredApplications,
+    Classes/ActivatableClasses...) e poluindo o reset de trial com chaves
+    alheias ao programa. Agora:
+      1. Casa primeiro pelo NOME/PUBLICADOR do aplicativo (filtro principal);
+      2. So aceita match por palavra de trial se a chave tambem pertencer ao
+         escopo do app OU se o nome dela nao for ruido generico conhecido.
+    """
     found = []
-    needles = [app.name] + TRIL_KEYWORDS_SAFE(app)
+    app_tokens = _app_identity_tokens(app)
     if HAS_WINREG:
         for hive, path in TRIAL_LOCATIONS:
             if path == "Software":
-                found += _find_reg_matches(hive, path, needles)
+                found += _find_reg_matches(hive, path, app_tokens, depth=3)
     for env in ("%APPDATA%", "%LOCALAPPDATA%", "%PROGRAMDATA%"):
         base = os.path.expandvars(env)
         if os.path.isdir(base):
             for entry in os.listdir(base):
-                if _matches_needle(entry, needles):
+                if _token_match(entry, app_tokens):
                     found.append("FILE:%s" % os.path.join(base, entry))
-    return found
+    # dedupe preservando ordem
+    seen = set()
+    out = []
+    for f in found:
+        if f not in seen:
+            seen.add(f)
+            out.append(f)
+    return out
+
+
+def _app_identity_tokens(app: InstalledApp) -> List[str]:
+    """Tokens que identificam o proprioo aplicativo (nome + publicador)."""
+    toks = []
+    for src in (app.name, app.publisher):
+        for w in re.split(r"[^A-Za-z0-9]+", src or ""):
+            if len(w) >= 4 and w.lower() not in ("setup", "install", "inc", "ltd",
+                                                 "gmbh", "software", "system",
+                                                 "systems", "corp", "corporation"):
+                toks.append(w.lower())
+    return sorted(set(toks), key=len, reverse=True)
 
 
 def TRIL_KEYWORDS_SAFE(app):
@@ -381,7 +419,26 @@ def TRIL_KEYWORDS_SAFE(app):
     return [w for w in words if len(w) > 3]
 
 
-def _find_reg_matches(hive, path, needles, depth=2):
+def _token_match(text, tokens):
+    t = text.lower()
+    return any(tok in t for tok in tokens)
+
+
+def _is_generic_noise(sub_lower):
+    """True se o nome da chave so casa com ruido generico do Windows."""
+    return any(g in sub_lower for g in GENERIC_NOISE_WORDS)
+
+
+def _find_reg_matches(hive, path, app_tokens, depth=3):
+    """Procura chaves que pertençam AO APP (nome/publicador no caminho).
+
+    Uma chave so e considerada artefato de trial/licenca quando:
+      - seu ultimo segmento contem um token do aplicativo; ou
+      - todo o caminho contem um token do aplicativo E o ultimo segmento tem
+        uma palavra de trial (ex.: Software\\Acme App\\License).
+    Chaves sem nenhuma relacao com o app (Classes/..., ActiveMovie, etc.)
+    sao ignoradas — corrigindo os falsos positivos da versao anterior.
+    """
     matches = []
     if not HAS_WINREG or depth < 0:
         return matches
@@ -396,10 +453,21 @@ def _find_reg_matches(hive, path, needles, depth=2):
         except OSError:
             break
         i += 1
-        full = "%s\\%s\\%s" % ("HKLM" if hive == winreg.HKEY_LOCAL_MACHINE else "HKCU", path, sub)
-        if _matches_needle(sub, needles) or any(_matches_needle(k, TRIAL_KEYWORDS) for k in [sub]):
+        hive_name = "HKLM" if hive == winreg.HKEY_LOCAL_MACHINE else "HKCU"
+        full = "%s\\%s\\%s" % (hive_name, path, sub)
+        sub_l = sub.lower()
+        owns_app = _token_match(sub_l, app_tokens)
+        parent_has_app = _token_match(path.lower(), app_tokens)
+        has_trial_kw = any(k in sub_l for k in TRIAL_KEYWORDS)
+        accept = False
+        if owns_app and not _is_generic_noise(sub_l):
+            # chave do proprio app: sempre relevante (licenca/config/contadores)
+            accept = True
+        elif parent_has_app and has_trial_kw and not _is_generic_noise(sub_l):
+            accept = True
+        if accept:
             matches.append("REG:%s" % full)
-        matches += _find_reg_matches(hive, path + "\\" + sub, needles, depth - 1)
+        matches += _find_reg_matches(hive, path + "\\" + sub, app_tokens, depth - 1)
     winreg.CloseKey(key)
     return matches
 
